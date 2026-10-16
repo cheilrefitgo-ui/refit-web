@@ -1,0 +1,19 @@
+# 리핏(Refit) Netlify 설정
+[build]
+  publish = "."
+
+# 보안 헤더
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+
+# SPA — 해시 라우팅이라 리다이렉트는 사실상 불필요하지만 안전용
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
