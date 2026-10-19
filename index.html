@@ -1900,10 +1900,8 @@ const DB = {
       KSTORE.setItem('notifyLog', JSON.stringify(log.slice(0,50)));
       return;
     }
-    // 실서비스: Edge Function 호출 (service_role은 서버에만, 여기선 anon)
-    try{
-      await sb.functions.invoke('send-notification', { body: payload });
-    }catch(e){ console.warn('알림 발송 실패(무시하고 예약은 유지):', e); }
+    // v180: 운영 모드에서는 bookings 표의 트리거가 알림을 대기열에 넣고, 스케줄러가 NHN Cloud 로 보냅니다 (자동알림 패키지). 여기서는 할 일이 없습니다.
+    return;
   },
 
   // 올해 이미 사용한 횟수 (연간 지원 한도 표시용)
@@ -7566,6 +7564,7 @@ const EMP_ALIAS = { 'ai':'my.profile', 'ai.analysis':'my.profile', 'ai.reco':'my
 window.navGo = (roleKey, sec) => {
   if(roleKey === 'emp'){
     sec = EMP_ALIAS[sec] || sec;
+    if(sec === 'result.change' && LIVE) loadMyMoti();                 // v180: 서버에서 내 결과
     // 예약 하위 메뉴는 신청 단계로 연결됩니다 (앞 단계로만 이동).
     // 예약 메뉴는 하위 항목 없이 하나입니다. 진행 중인 단계를 그대로 이어 갑니다.
     if(sec === 'book'){
@@ -7610,6 +7609,7 @@ window.navGo = (roleKey, sec) => {
     const PF_FIRST = {trainers:'trainers.cal', stats:'stats.usage', system:'system.accounts'};   // v164: 부모 메뉴 → 첫 하위 메뉴
     S.nav.pf = PF_FIRST[sec] || sec;
     if(S.nav.pf === 'system.accounts' && LIVE) loadAccountsLive();   // v178
+    if(S.nav.pf === 'moti' && LIVE) loadMotiAdmin();                  // v180
   }
   if(roleKey === 'tr') S.nav.tr = sec;
   render(); window.scrollTo(0,0);
@@ -7707,11 +7707,12 @@ function motiPeopleList(){
   local.all().forEach(b => { const k = String(b.email || '').toLowerCase(); if(k && !people.has(k)) people.set(k, {email:b.email, name:b.name, company:b.company}); });
   return [...people.values()];
 }
+function motiPeopleListLive(){ return MOTI_CACHE.people || []; }
 function pfMotiListHTML(){
   const all = motiAll();
   const q = PM.q.trim().toLowerCase();
   const co = AD.companyFilter || 'all';
-  const list = motiPeopleList()
+  const list = (LIVE ? motiPeopleListLive() : motiPeopleList())
     .filter(p => co === 'all' || (p.company || '') === co)
     .filter(p => !q || (p.name || '').toLowerCase().includes(q) || (p.email || '').toLowerCase().includes(q))
     .sort((a, b) => (all[b.email?.toLowerCase()] ? 1 : 0) - (all[a.email?.toLowerCase()] ? 1 : 0) || String(a.name).localeCompare(String(b.name)));
@@ -7742,13 +7743,15 @@ function pfMotiVideosHTML(){
     </div>`;
 }
 window.setVideoLink = (key, v) => {
-  const all = videoLinks(); const s = String(v || '').trim();
+  const all = Object.assign({}, videoLinks()); const s = String(v || '').trim();
   if(s && youtubeId(s)) all[key] = s; else delete all[key];
-  KSTORE.setItem(VIDEO_OVR_KEY, JSON.stringify(all));
+  if(LIVE){ Object.keys(VIDEO_OVR_CACHE).forEach(k => delete VIDEO_OVR_CACHE[k]); Object.assign(VIDEO_OVR_CACHE, all);
+            DB.setSetting('video_links', JSON.stringify(all)).catch(e => { console.error(e); toast('영상 링크를 서버에 저장하지 못했습니다.'); }); }
+  else KSTORE.setItem(VIDEO_OVR_KEY, JSON.stringify(all));
   toast(s && !youtubeId(s) ? '유튜브 주소 형식이 아닙니다. 기본값으로 둡니다.' : (s ? `${key} 영상을 바꿨습니다.` : `${key} 영상을 기본값으로 되돌렸습니다.`)); render();
 };
-window.motiApprove = (email) => {
-  const r = motiGet(email); if(!r) return;
+window.motiApprove = async (email) => {
+  const r = await loadMotiRecord(email); if(!r) return;
   if(!r.summary?.length){ const a = motiAnalyze(r); r.summary = a.summary; r.exercises = a.exercises; r.targets = a.targets; }
   { const v = motiPickVideos(r); r.videos = v.videos; r.videoTargets = v.videoTargets; }
   r.status = 'approved'; r.at = new Date().toISOString(); motiPut(r);
@@ -9402,6 +9405,7 @@ function donutChart(items, opt = {}) {
   .reco-video iframe{position:absolute;inset:0;width:100%;height:100%;border:0;z-index:1;background:transparent}
   .reco-card.has-video{grid-template-columns:28px minmax(0,1fr)}
   .reco-card.has-video .reco-head{grid-column:2;margin:0 0 8px}
+  .reco-why{font-size:11.5px;color:var(--muted);margin-top:2px}
   .reco-card.has-video .reco-video{grid-column:2;margin-bottom:2px}
   .reco-card.has-video .reco-body{grid-column:2}
   .reco-nophoto{width:100%;aspect-ratio:16/10;border-radius:10px;background:#EEF2FA;display:flex;align-items:center;justify-content:center}
@@ -12529,11 +12533,60 @@ const EXERCISE_PHOTOS = [
               (B) 플랫폼 관리자가 올리고 승인 → 'approved'
    ============================================================ */
 const MOTI_KEY = 'motiResults';
-function motiAll(){ try{ return JSON.parse(KSTORE.getItem(MOTI_KEY) || '{}'); }catch{ return {}; } }
+/* v180: 운영 모드에서는 서버(moti_results)가 원본이고, 아래 캐시는 화면을 그리기 위한 사본입니다. */
+const MOTI_CACHE = { recs:{}, people:null, mineLoaded:false };
+function motiAll(){ if(LIVE) return MOTI_CACHE.recs; try{ return JSON.parse(KSTORE.getItem(MOTI_KEY) || '{}'); }catch{ return {}; } }
+async function loadMyMoti(force){
+  if(!LIVE || !(S.auth && S.auth.user)) return;
+  if(MOTI_CACHE.mineLoaded && !force) return;
+  try{
+    const {data, error} = await sb.rpc('moti_get_mine');
+    if(error) throw error;
+    const e = String(S.auth.user.email).toLowerCase();
+    if(data) MOTI_CACHE.recs[e] = Object.assign({email:e}, data); else delete MOTI_CACHE.recs[e];
+    MOTI_CACHE.mineLoaded = true;
+  }catch(err){ console.error(err); }
+  render();
+}
+async function loadMotiAdmin(){
+  if(!LIVE) return;
+  try{
+    const {data, error} = await sb.rpc('moti_admin_list');
+    if(error) throw error;
+    MOTI_CACHE.people = (data || []).map(x => ({email:x.email, name:x.name, company:x.company}));
+    (data || []).forEach(x => { const e = String(x.email).toLowerCase();
+      if(x.status) MOTI_CACHE.recs[e] = Object.assign(MOTI_CACHE.recs[e] || {email:e}, {status:x.status, measured:x.measured, grade:x.grade, at:x.at, _light:true});
+      else delete MOTI_CACHE.recs[e]; });
+  }catch(err){ console.error(err); toast('체형 분석 목록을 불러오지 못했습니다.'); }
+  render();
+}
+async function loadMotiRecord(email){
+  if(!LIVE) return motiGet(email);
+  const e = String(email || '').toLowerCase();
+  const cur = MOTI_CACHE.recs[e];
+  if(cur && !cur._light) return cur;
+  try{
+    const {data, error} = await sb.rpc('moti_admin_get', {p_email:e});
+    if(error) throw error;
+    if(data){ MOTI_CACHE.recs[e] = Object.assign({email:e}, data); return MOTI_CACHE.recs[e]; }
+    delete MOTI_CACHE.recs[e]; return null;
+  }catch(err){ console.error(err); toast('결과를 불러오지 못했습니다.'); return cur || null; }
+}
 function motiSaveAll(all){ KSTORE.setItem(MOTI_KEY, JSON.stringify(all)); }
 function motiGet(email){ return motiAll()[String(email || '').toLowerCase()] || null; }
-function motiPut(rec){ const all = motiAll(); all[String(rec.email).toLowerCase()] = rec; motiSaveAll(all); }
-function motiRemove(email){ const all = motiAll(); delete all[String(email).toLowerCase()]; motiSaveAll(all); }
+function motiPut(rec){
+  const e = String(rec.email).toLowerCase();
+  if(LIVE){
+    MOTI_CACHE.recs[e] = rec;
+    sb.rpc('moti_admin_put', {p_email:e, p_status:rec.status || 'draft', p_data:rec})
+      .then(({error}) => { if(error){ console.error(error); toast('서버 저장 실패: ' + error.message); } });
+    return;
+  }
+  const all = motiAll(); all[e] = rec; motiSaveAll(all); }
+function motiRemove(email){
+  const e = String(email).toLowerCase();
+  if(LIVE){ delete MOTI_CACHE.recs[e]; sb.rpc('moti_admin_delete', {p_email:e}).then(({error}) => { if(error) toast('삭제 실패: ' + error.message); }); return; }
+  const all = motiAll(); delete all[e]; motiSaveAll(all); }
 function motiFor(){ return motiGet(S.auth.user?.email); }
 
 /* 운동 라이브러리 — 불균형 항목의 부위(키워드) → 운동. youtube 에 영상 ID를 넣으면 사진 대신 영상이 나옵니다. */
@@ -12571,22 +12624,36 @@ const VIDEO_LIB = [
   { key:'골반',      url:'https://youtu.be/NwJkeFUYe9U', tags:['pelvis','pelvis_rot','pelvis_back','hip','lumbar'], title:'골반 교정 운동', desc:'틀어지고 돌아간 골반을 제자리로 — 힙·코어 안정화.' },
 ];
 const VIDEO_OVR_KEY = 'videoLinks';                       // 관리자가 링크를 바꾸면 여기 저장
-function videoLinks(){ try{ return JSON.parse(KSTORE.getItem(VIDEO_OVR_KEY) || '{}'); }catch{ return {}; } }
+const VIDEO_OVR_CACHE = {};                               // v180: 운영 모드는 settings.video_links 에서 읽어 둠
+function videoLinks(){ if(LIVE) return VIDEO_OVR_CACHE; try{ return JSON.parse(KSTORE.getItem(VIDEO_OVR_KEY) || '{}'); }catch{ return {}; } }
 function videoByKey(key){ const v = VIDEO_LIB.find(x => x.key === key); if(!v) return null;
   const o = videoLinks()[key]; return Object.assign({}, v, o ? {url:o} : {}); }
 /* 결과 → 영상 키 3개: [호흡/걷기, 1순위 부위, 2순위 부위]
    v132: 결과지 순위 그대로 따릅니다. 1순위 항목의 부위 영상 → 그다음 순위 중 '다른 부위'의 첫 항목 영상.
    (예전에는 부위별 점수를 합산해 골라서, 낮은 순위 항목이 여러 개인 부위가 1순위 부위를 앞지르는 일이 있었습니다) */
-function motiVideoOfTag(tag){ return VIDEO_LIB.find(v => !v.base && v.tags.includes(tag)) || null; }
+function motiVideoOfTag(tag){ return tag ? (VIDEO_LIB.find(v => !v.base && v.tags.includes(tag)) || null) : null; }
+/* v180: 항목 순서는 결과지 순위 숫자(rank) 기준. AI 가 준 부위 태그가 있으면 그것을, 없으면 이름 키워드로 부위를 정합니다. */
+function motiRankedItems(rec){
+  return (rec.items || []).filter(i => i.part)
+    .map((i, k) => Object.assign({}, i, {_idx:k, tag: (i.tag && i.tag !== 'core') ? i.tag : motiTagOf(i.part)}))
+    .sort((a, b) => (Number(a.rank) || a._idx + 1) - (Number(b.rank) || b._idx + 1))
+    .map((i, k) => Object.assign(i, {rank:k + 1}));
+}
 function motiPickVideos(rec){
-  const items = (rec.items || []).filter(i => i.part).map((i, k) => Object.assign({}, i, {rank:k+1, tag: motiTagOf(i.part)}));
+  const items = motiRankedItems(rec);
   const picked = [];
-  for(const i of items){                       // 순위 순서대로
+  for(const i of items){                       // 순위 순서대로 — 1순위 부위 영상, 그다음 '다른' 부위 영상
     if(picked.length >= 2) break;
     const v = motiVideoOfTag(i.tag);
     if(v && !picked.includes(v.key)) picked.push(v.key);
   }
-  for(const v of VIDEO_LIB){ if(picked.length >= 2) break; if(!v.base && !picked.includes(v.key)) picked.push(v.key); }
+  // 부위를 못 찾아 2개가 안 채워지면: 결과지가 하체 위주면 골반·무릎, 상체 위주면 등뼈·어깨 순으로 (예전엔 목록 첫 번째 '어깨'가 무조건 들어갔음)
+  if(picked.length < 2){
+    const lower = items.filter(i => ['pelvis','pelvis_rot','pelvis_back','knee','leg','lumbar','hip'].includes(i.tag)).length;
+    const upper = items.filter(i => ['head','neck','shoulder','clavicle','thoracic'].includes(i.tag)).length;
+    const order = lower >= upper ? ['골반','무릎','등뼈','어깨','머리','다리','쇄골'] : ['등뼈','어깨','머리','골반','쇄골','무릎','다리'];
+    for(const k of order){ if(picked.length >= 2) break; if(!picked.includes(k)) picked.push(k); }
+  }
   const keys = ['호흡/걷기'].concat(picked);
   const targets = {};
   keys.forEach(k => { const v = VIDEO_LIB.find(x => x.key === k);
@@ -12620,8 +12687,22 @@ function motiTagOf(part){
   if(/O ?다리|X ?다리|발목|안짱|팔자|다리/.test(p)) return 'leg';   // '발목'은 '목'보다 먼저 봅니다
   if(/쇄골/.test(p)) return 'clavicle';
   if(/어깨|라운드|날개뼈|견갑/.test(p)) return 'shoulder';
-  if(/목|경추/.test(p)) return 'neck';          // '목' 항목 → 쇄골·목 영상
-  if(/허리|요추|전만/.test(p)) return 'lumbar';
+  if(/목|경추/.test(p)) return 'neck';          // v181: '목' 항목 → 쇄골 영상(쇄골·목 주변 근육 운동)
+  if(/허리|요추|전만|복부|코어/.test(p)) return 'lumbar';
+  if(/측만|척추|굽은 등|후만/.test(p)) return 'thoracic';
+  if(/종아리|햄스트링|아킬레스|허벅지/.test(p)) return 'knee';
+  if(/발|아치|평발|족/.test(p)) return 'leg';
+  if(/상체 기울|체중|무게 중심|무게중심|좌우 균형/.test(p)) return 'pelvis';
+  // 영문 표기 (AI 판독·외부 결과지)
+  if(/knee/i.test(p)) return 'knee';
+  if(/pelvi|hip/i.test(p)) return /rot/i.test(p) ? 'pelvis_rot' : 'pelvis';
+  if(/thorac|spine|kyph|scoli/i.test(p)) return 'thoracic';
+  if(/head|forward/i.test(p)) return 'head';
+  if(/neck|cervic/i.test(p)) return 'neck';
+  if(/shoulder|scapul/i.test(p)) return 'shoulder';
+  if(/clavic/i.test(p)) return 'clavicle';
+  if(/leg|ankle|foot|bow/i.test(p)) return 'leg';
+  if(/lumbar|low back/i.test(p)) return 'lumbar';
   if(/굴곡/.test(p)) return 'knee';             // 부위 이름 없이 '굴곡변형'만 있을 때
   if(/후방 이동/.test(p)) return 'thoracic';    // 부위 이름 없이 '후방 이동'만 있을 때
   return 'core';
@@ -12629,8 +12710,8 @@ function motiTagOf(part){
 
 /* 규칙 판독 — items(순위·각도·긴장도) 와 등급으로 종합 소견 3줄 + 운동 3개(id) */
 function motiAnalyze(rec){
-  const items = (rec.items || []).filter(i => i.part).map((i, k) => Object.assign({rank:k+1}, i));
-  const tagged = items.map(i => Object.assign({tag: motiTagOf(i.part)}, i));
+  const tagged = motiRankedItems(rec);
+  const items = tagged;
   const top = tagged.slice(0, 2);
   const hi = tagged.filter(i => Number(i.tension) >= 66);
   const posture = tagged.filter(i => ['thoracic','neck','shoulder'].includes(i.tag));
@@ -12698,13 +12779,18 @@ async function fileToSheetImage(file){
 /* ---------- 결과지 등록/판독 창 (임직원 본인 · 플랫폼 관리자 공용) ---------- */
 /* AI 판독 — 결과지 이미지를 서버(Edge Function)에 보내 등급·불균형 항목을 JSON 으로 받습니다.
    MOTI_AI_ENDPOINT 가 비어 있으면(데모) 서버 없이 샘플 판독 결과를 씁니다. */
-const MOTI_AI_ENDPOINT = '';   // 예: 'https://<project>.functions.supabase.co/moti-read'
+const MOTI_AI_ENDPOINT = '';   // 비워 두면 운영 모드에서는 Supabase 주소/functions/v1/moti-read 를 자동으로 씁니다
+function motiAiEndpoint(){ return MOTI_AI_ENDPOINT || (LIVE ? SUPABASE_URL.replace(/\/$/, '') + '/functions/v1/moti-read' : ''); }
 async function motiAiRead(sheetDataURL){
+  const MOTI_AI_ENDPOINT = motiAiEndpoint();
   if(MOTI_AI_ENDPOINT){
     const res = await fetch(MOTI_AI_ENDPOINT, { method:'POST', headers:{'Content-Type':'application/json',
       ...(typeof SUPABASE_ANON_KEY !== 'undefined' && SUPABASE_ANON_KEY ? {Authorization:'Bearer ' + SUPABASE_ANON_KEY} : {})},
       body: JSON.stringify({ image: sheetDataURL }) });
-    if(!res.ok) throw new Error('AI 판독 서버 응답 오류 (' + res.status + ')');
+    if(!res.ok){
+      if(res.status === 404 || res.status === 500) return { manual:true, reason:'AI 판독 서버(moti-read)가 아직 배포되지 않았거나 API 키가 없습니다. 값을 직접 입력해 주세요.' };
+      throw new Error('AI 판독 서버 응답 오류 (' + res.status + ')');
+    }
     const j = await res.json();
     if(!j || !Array.isArray(j.items)) throw new Error('AI 판독 결과 형식이 올바르지 않습니다.');
     return Object.assign({ demo:false }, j);
@@ -12717,10 +12803,10 @@ async function motiAiRead(sheetDataURL){
 }
 
 const ME = { rec:null, mode:'admin', busy:false, msg:'', showItems:false };
-window.openMotiEditor = (opt) => {
+window.openMotiEditor = async (opt) => {
   if(!(S.admin && S.admin.authed && S.admin.role === 'operator')){ toast('결과지는 플랫폼 관리자만 등록할 수 있습니다.'); return; }
   const email = String(opt.email || '').toLowerCase();
-  const cur = motiGet(email);
+  const cur = await loadMotiRecord(email);
   ME.mode = 'admin';
   ME.rec = cur ? JSON.parse(JSON.stringify(cur)) : {
     email, name: opt.name || '', measured:'', place:'제일리핏케어', sheet:'', grade:'', pct:'', front:'', side:'', back:'',
@@ -12803,6 +12889,7 @@ window.motiPickFile = async (file) => {
     ME.msg = 'AI 가 등급과 불균형 항목을 읽는 중…'; renderMotiEditor();
     const ai = await motiAiRead(r.sheet);
     if(ai.manual){                       // 서버 없음 → 직접 입력
+      if(ai.reason) toast(ai.reason);
       r.grade = ''; r.pct = ''; r.front = ''; r.side = ''; r.back = '';
       r.measured = iso(new Date()).replace(/-/g, '.');
       r.items = [1,2,3].map(() => ({part:'', deg:'', tension:'', cause:''}));
@@ -12813,11 +12900,14 @@ window.motiPickFile = async (file) => {
     r.manual = false;
     r.grade = ai.grade || r.grade; r.pct = ai.pct || r.pct; r.front = ai.front || ''; r.side = ai.side || ''; r.back = ai.back || '';
     r.measured = ai.measured || r.measured || iso(new Date()).replace(/-/g, '.');
-    r.items = (ai.items || []).map((i, k) => ({ rank:k+1, part:i.part || '', deg:i.deg || '', tension:Number(i.tension) || 0, cause:i.cause || '' }));
+    r.items = (ai.items || []).map((i, k) => ({ rank:k+1, part:i.part || '', deg:i.deg || '', tension:Number(i.tension) || 0, cause:i.cause || '', tag:i.tag || '' }));
     r.aiDemo = !!ai.demo;
     if(ai.demo) ME.showItems = true;     // 샘플 값이면 확인·수정 칸을 펼쳐 둡니다
     const a = motiAnalyze(r);
-    r.summary = a.summary; r.exercises = a.exercises; r.targets = a.targets; r.videos = a.videos; r.videoTargets = a.videoTargets;
+    // v180: AI 가 종합 소견 3줄을 돌려주면 그것을 쓰고, 없으면 규칙 소견
+    r.summary = (Array.isArray(ai.summary) && ai.summary.length === 3) ? ai.summary : a.summary;
+    r.aiSummary = (Array.isArray(ai.summary) && ai.summary.length === 3);
+    r.exercises = a.exercises; r.targets = a.targets; r.videos = a.videos; r.videoTargets = a.videoTargets;
     ME.msg = '';
   }catch(e){ ME.msg = e.message || '파일을 읽지 못했습니다.'; }
   ME.busy = false; renderMotiEditor();
@@ -12892,7 +12982,8 @@ function recoBodyHTML(){
       const vid = youtubeId(v.url);
       return `<div class="reco-card has-video">
         <div class="reco-n">${i+1}</div>
-        <div class="reco-head"><div class="reco-name">${esc(v.title)}</div></div>
+        <div class="reco-head"><div class="reco-name">${esc(v.title)}</div>
+          <div class="reco-why">${esc(pick.videoTargets[k] || '')}</div></div>
         ${vid ? `<div class="reco-video" style="background-image:url('https://img.youtube.com/vi/${vid}/hqdefault.jpg')">
                   <a class="reco-play" href="${esc(v.url)}" target="_blank" rel="noopener" title="유튜브에서 재생">${ico('play_arrow','')}</a>
                   <iframe src="https://www.youtube-nocookie.com/embed/${vid}?rel=0&modestbranding=1&playsinline=1" title="${esc(v.title)}" loading="lazy"
@@ -13254,6 +13345,7 @@ async function boot(){
         if(Object.keys(ov).length === 0) await DB.setSetting('program_hosts', '{}');
       }catch(e){ console.error(e); }
     }
+    if(st.video_links){ try{ Object.assign(VIDEO_OVR_CACHE, JSON.parse(st.video_links)); }catch(e){ console.error(e); } }   // v180
     if(st.trainer_colors){
       try{ Object.assign(TR_COLOR_SET, JSON.parse(st.trainer_colors)); }
       catch(e){ console.error(e); }
@@ -13301,6 +13393,7 @@ async function boot(){
   if(r.sec) S.nav.emp = r.sec;
 
   // 만족도 조사 화면은 대상 예약을 먼저 찾습니다.
+  if(LIVE && S.nav.emp === 'result.change' && !MOTI_CACHE.mineLoaded) loadMyMoti();   // v180
   if(S.nav.emp === 'result.session' && SV.state !== 'form'){
     render(); await lookupMine();
     return;
