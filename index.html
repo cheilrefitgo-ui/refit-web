@@ -1711,7 +1711,7 @@ const SIGNUP_SECTIONS = [
                  placeholder:'부상, 복용 중인 약, 요청 사항 등 · 위 문항에서 다 적지 못한 내용을 자유롭게 적어 주세요 (선택)'},
     {id:'consent_base', type:'consent', required:true,
                  q:'건강 상태 응답의 수집·이용에 동의합니다. 응답은 담당 운동처방사·상담사만 확인하며, ' +
-                   '회사에는 개인별로 제공되지 않습니다. 보관 기간은 3년이며, 언제든 내 정보에서 삭제를 요청할 수 있습니다.'},
+                   '회사에는 개인별로 제공되지 않습니다. 보관 기간은 1개월이며, 언제든 내 정보에서 삭제를 요청할 수 있습니다.'},
   ]},
 ];
 
@@ -4568,7 +4568,9 @@ function firstPwPane(){
   if(!FPW.name) FPW.name = u.name || '';
   const f = (id, label, key, ph, ac) => pwFieldHTML(id, label, 'FPW', FPW, key, ph, ac, 'submitFirstPw()').replace('<div class="lgf">', '<div class="lgf lgf-full">');
   return `<div class="lgwrap lg-open">${lgSideHTML()}
-    <main class="lgmain"><div class="lgform lgform-signup">
+    <main class="lgmain">
+      <button type="button" class="lgback" title="로그인 화면으로 돌아가기" aria-label="로그인 화면으로 돌아가기" onclick="firstPwBack()">${ico('arrow_back','')}</button>
+      <div class="lgform lgform-signup">
       <h2 class="lgform-h">처음 로그인 설정</h2>
       <p class="lgform-s">${esc(u.name)} 님, 발급받은 아이디로 처음 로그인하셨습니다. 회원가입과 같은 순서로 기본 정보와 새 비밀번호를 정한 뒤, 소속 회사 선택 → 사전 상담으로 이어집니다.</p>
 
@@ -5667,7 +5669,7 @@ function surveyButton(i){
   if(!b || b.status === 'canceled') return '';
   if(!sessionEnded(b)){
     const end = sessionEndAt(b);
-    return end ? `<span class="survey-wait">${ico('schedule','')} 만족도 조사는 프로그램 종료(${fmtTime(new Date(end).toTimeString().slice(0,5))}) 후에 열립니다</span>` : '';
+    return end ? `<span class="survey-wait">${ico('schedule','')} 만족도 조사는 프로그램 종료 후에 열립니다</span>` : '';
   }
   if(b.survey) return `<button class="btn ghost" disabled
       style="opacity:.55;cursor:default">${ico('task_alt','')} 만족도 응답 완료</button>`;
@@ -7469,8 +7471,18 @@ function sessionAlive(){
   }catch(e){ return true; }
 }
 
-window.memberLogout = async () => {
-  if(!confirm('로그아웃할까요?')) return;
+/* v220: 첫 로그인 설정 화면의 뒤로가기 — 입력을 버리고 로그인 화면으로 (로그아웃과 같음).
+   브라우저의 ← 버튼도 같은 동작을 하도록 history 항목을 하나 넣어 둡니다(boot 의 mustChangePw 분기). */
+window.firstPwBack = async (fromHistory) => {
+  const ok = confirm('처음 로그인 설정을 중단하고 로그인 화면으로 돌아갈까요?\n입력한 내용은 저장되지 않습니다.');
+  if(!ok){ if(fromHistory) history.pushState({fpw:true}, ''); return; }
+  await memberLogout(true);
+};
+window.addEventListener('popstate', () => {
+  if(S.auth.user && S.auth.user.mustChangePw) firstPwBack(true);
+});
+window.memberLogout = async (skipConfirm) => {
+  if(skipConfirm !== true && !confirm('로그아웃할까요?')) return;
   await DB.memberSignOut();
   try{ KSTORE.removeItem('authKeep'); sessionStorage.removeItem('authAlive'); }catch(e){}
   S.auth.user = null;
@@ -11020,7 +11032,7 @@ function platformAdminPane(){
                       'bookings','stats.usage','stats.compare','stats.intake','moti'].includes(sec);
   // 체형 분석 결과 화면은 예약 건수가 아니라 임직원 수로 셉니다
   const isMoti = sec === 'moti';
-  const motiPeople = isMoti ? motiPeopleList() : [];
+  const motiPeople = isMoti ? (LIVE ? motiPeopleListLive() : motiPeopleList()) : [];   // v221: 운영 모드는 서버 목록으로 셈
   const cos = isMoti
     ? [...new Set(motiPeople.map(p => p.company || ''))].map(id => ({id, name: id ? companyName(id) : '미지정'}))
     : companiesInData();
@@ -13571,6 +13583,7 @@ function render(){ window.__appReady = true;
 
   // 발급받은 임시 비밀번호로 처음 로그인했으면 비밀번호부터 바꿉니다.
   if(S.auth.user && S.auth.user.mustChangePw){
+    if(!(history.state && history.state.fpw)) history.pushState({fpw:true}, '');   // v220: 브라우저 ← 로 로그인 화면 복귀
     app.innerHTML = `<main class="flex-1 w-full bg-background">${firstPwPane()}</main>`;
     return;
   }
