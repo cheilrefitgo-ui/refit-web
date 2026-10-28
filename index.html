@@ -2225,6 +2225,18 @@ const DB = {
     return {ok:true};
   },
 
+  /* v223: 알림 수신 메일 (employees.contact_email) — 비어 있으면 로그인 아이디로 보냅니다 (24_refit_contact_email.sql) */
+  async setContactEmail(cemail){
+    const v = String(cemail||'').trim().toLowerCase();
+    if(!LIVE){ const s = this.memberStore.session(); if(!s) return {ok:false}; const m = this.memberStore.all(); if(m[s.email]){ m[s.email].contactEmail = v; this.memberStore.save(m); } return {ok:true}; }
+    const {error} = await sb.rpc('set_contact_email', {p_email: v || null});
+    return error ? {ok:false, msg:error.message} : {ok:true};
+  },
+  async getContactEmail(){
+    if(!LIVE){ const s = this.memberStore.session(); const m = this.memberStore.all(); return (s && m[s.email] && m[s.email].contactEmail) || ''; }
+    const {data, error} = await sb.rpc('my_contact_email'); return error ? '' : (data || '');
+  },
+
   async memberChangePw(email, curPw, newPw, keepSession){
     const e = authEmailOf(email);
     if(!LIVE){
@@ -4561,10 +4573,10 @@ function pwBoxHTML(){
 /* 첫 로그인 — 임시 비밀번호를 새 비밀번호로 */
 /* 첫 로그인 설정 — 회원가입에서 받던 내용(비밀번호 · 주민등록번호 앞 7자리 · 휴대폰)을 여기서 받습니다.
    이름은 발급할 때 넣었으므로 보여만 주고, 이어서 사전 상담으로 넘어갑니다. */
-const FPW = {cur:'', pw:'', pw2:'', name:'', msg:'', busy:false, forEmail:''};
+const FPW = {cur:'', pw:'', pw2:'', name:'', cemail:'', msg:'', busy:false, forEmail:''};
 function firstPwPane(){
   const u = S.auth.user;
-  if(FPW.forEmail !== (u.email||'')){ FPW.forEmail = u.email||''; FPW.name = ''; FPW.cur = FPW.pw = FPW.pw2 = ''; FPW.msg = ''; }
+  if(FPW.forEmail !== (u.email||'')){ FPW.forEmail = u.email||''; FPW.name = ''; FPW.cemail = ''; FPW.cur = FPW.pw = FPW.pw2 = ''; FPW.msg = ''; }
   if(!FPW.name) FPW.name = u.name || '';
   const f = (id, label, key, ph, ac) => pwFieldHTML(id, label, 'FPW', FPW, key, ph, ac, 'submitFirstPw()').replace('<div class="lgf">', '<div class="lgf lgf-full">');
   return `<div class="lgwrap lg-open">${lgSideHTML()}
@@ -4595,6 +4607,12 @@ function firstPwPane(){
                value="${esc(AUTH.phone)}" placeholder="010-1234-5678" oninput="setAuthPhone(this)">
         <p class="lgf-help">예약 확정·일정 알림을 문자로 보내드립니다.</p>
       </div>
+      <div class="lgf">
+        <label for="fpwCemail">이메일 <small style="font-weight:400;color:var(--muted)">(알림 수신용)</small></label>
+        <input id="fpwCemail" type="email" inputmode="email" autocomplete="email" value="${esc(FPW.cemail)}"
+               placeholder="name@kic.go.kr" oninput="FPW.cemail=this.value">
+        <p class="lgf-help">예약 확정·일정 알림을 이 메일로도 보내드립니다.</p>
+      </div>
 
       <div class="lgf"><label>아이디 <small style="font-weight:400;color:var(--muted)">(발급받은 아이디 · 자동 입력)</small></label>
         <input type="text" value="${esc(displayId(u.email))}" disabled></div>
@@ -4612,6 +4630,7 @@ window.submitFirstPw = async () => {
   if(!String(FPW.name||'').trim()) msg = '이름을 입력해 주세요.';
   else if(!rr.ok) msg = rr.msg;
   else if(!validPhone(AUTH.phone)) msg = '휴대폰 번호를 확인해 주세요. (예: 010-1234-5678)';
+  else if(!isEmailId(FPW.cemail)) msg = '알림을 받을 이메일을 확인해 주세요. (예: name@kic.go.kr)';
   else if(!FPW.cur) msg = '임시 비밀번호를 입력해 주세요.';
   else if((FPW.pw||'').length < 6) msg = '새 비밀번호는 6자 이상으로 입력해 주세요.';
   else if(FPW.pw !== FPW.pw2) msg = '새 비밀번호가 서로 다릅니다.';
@@ -4622,6 +4641,7 @@ window.submitFirstPw = async () => {
   if(res && res.ok){
     const profile = {sex: rr.sex, age: rr.band, birth_year: rr.year};
     try{ await DB.setFirstLoginInfo(u.email, FPW.name.trim(), profile, AUTH.phone.trim()); }catch(e){ console.error(e); }
+    try{ await DB.setContactEmail(FPW.cemail.trim()); }catch(e){ console.error(e); }   // v223: 알림 수신 메일
     Object.assign(u, {mustChangePw:false, name:FPW.name.trim(), profile, phone:AUTH.phone.trim()});
     S.form.name = u.name;
     AUTH.rrnF = ''; AUTH.rrnG = ''; FPW.cur = FPW.pw = FPW.pw2 = '';
@@ -12548,7 +12568,8 @@ window.unlockProfile = async () => {
   if(!res.ok){ PROF.msg = res.msg || '비밀번호가 일치하지 않습니다.'; return render(); }
   const u = S.auth.user || {}, b = BASE.saved || {};
   PROF.unlocked = true; PROF.pw = '';
-  PROF.form = {name: u.name || '', dept: b.dept || '', sex: b.sex || '', age: b.age || ''};
+  PROF.form = {name: u.name || '', dept: b.dept || '', sex: b.sex || '', age: b.age || '', cemail: ''};
+  try{ PROF.form.cemail = await DB.getContactEmail(); }catch(e){}
   // 운동 습관 네 문항은 지금 저장된 답을 그대로 가져와 고칩니다.
   PROF.ans = {};
   PROFILE_Q_IDS.forEach(id => {
@@ -12562,6 +12583,9 @@ window.unlockProfile = async () => {
 window.saveProfile = async () => {
   if(!String(PROF.form.name || '').trim()){
     PROF.msg = '이름을 입력해 주세요.'; return render();
+  }
+  if(String(PROF.form.cemail||'').trim() && !isEmailId(PROF.form.cemail)){
+    PROF.msg = '알림을 받을 이메일을 확인해 주세요. (예: name@kic.go.kr)'; return render();
   }
   PROF.busy = true; PROF.msg = ''; render();
   if(!validate(profileQs(), PROF.ans, 'prof')){
@@ -12577,6 +12601,7 @@ window.saveProfile = async () => {
   });
   PROF.busy = false;
   if(!res.ok){ PROF.msg = res.msg || '저장에 실패했습니다.'; return render(); }
+  try{ await DB.setContactEmail(PROF.form.cemail || ''); }catch(e){ console.error(e); }   // v223
   S.auth.user = {...S.auth.user, name: PROF.form.name.trim()};
   BASE.saved = {...(BASE.saved||{}), ...PROF.ans,
                 dept:PROF.form.dept, sex:PROF.form.sex, age:PROF.form.age};
@@ -12614,6 +12639,9 @@ function profileEditHTML(){
     <label class="pf-l">이름</label>
     <input class="pf-in" type="text" value="${esc(PROF.form.name||'')}"
            oninput="setProfField('name',this.value)">
+    <label class="pf-l">이메일 <span style="font-weight:400;color:var(--muted)">(알림 수신용)</span></label>
+    <input class="pf-in" type="email" inputmode="email" value="${esc(PROF.form.cemail||'')}" placeholder="name@kic.go.kr"
+           oninput="setProfField('cemail',this.value)">
     <label class="pf-l">소속 부서</label>
     ${sel('dept', deptOpts)}
     <p class="pf-s" style="margin:10px 0 0">성별·연령대는 가입할 때 입력하신
