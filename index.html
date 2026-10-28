@@ -11119,7 +11119,7 @@ function approvalCardHTML(){
       <span class="card-sub">가입할 때 입력한 아이디·이메일·사번 중 하나가 명단과 맞으면 가입이 진행됩니다. 명단이 비어 있으면 아무도 직접 가입할 수 없습니다.</span>
     </div>
     ${all.length ? `
-    <input type="text" placeholder="검색" value="${esc(ACC.apQ)}" oninput="ACC.apQ=this.value;render()"
+    <input type="text" class="livesearch" id="apSearch" data-sel="#apSearch" autocomplete="off" placeholder="검색" value="${esc(ACC.apQ)}" oninput="ACC.apQ=this.value;searchRender(this)"
            style="margin-top:12px;border:1px solid #DDE1E8;border-radius:8px;padding:5px 9px;font-size:12.5px">
     <table class="atable acc-tbl"><thead><tr><th>승인 키 (아이디·이메일·사번)</th><th>이름</th><th>등록일</th><th>가입 여부</th><th></th></tr></thead><tbody>
       ${list.map(x => `<tr><td><code>${esc(x.key)}</code></td><td>${esc(x.name||'—')}</td><td>${esc(String(x.at||'').slice(0,10))}</td>
@@ -11249,7 +11249,7 @@ function accountsPane(){
   </div>
   <div class="card">
     <div class="card-h">${ico('groups','')} 발급된 계정 ${all.length}명
-      <input type="text" placeholder="사번·이름 검색" value="${esc(ACC.q)}" oninput="ACC.q=this.value;render()"
+      <input type="text" class="livesearch" id="accSearch" data-sel="#accSearch" autocomplete="off" placeholder="사번·이름 검색" value="${esc(ACC.q)}" oninput="ACC.q=this.value;searchRender(this)"
              style="margin-left:12px;border:1px solid #DDE1E8;border-radius:8px;padding:5px 9px;font-size:12.5px;font-weight:400"></div>
     ${!all.length ? `<p class="card-p">아직 발급된 계정이 없습니다.</p>` : `
     ${ACC.sel.size ? `<div class="barline" style="margin:8px 0">
