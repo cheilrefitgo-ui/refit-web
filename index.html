@@ -1487,7 +1487,7 @@ const PROGRAMS = [
       {name:'강태이', role:'운동처방사'},
     ],
     /* 진행 장소 — 고객사(KIC) 건물 기준. 층·호실은 KIC 담당자와 확정 후 이 한 줄만 고치면 됩니다. */
-    location:'KIC 본사 휴게실',
+    location:'KIC 본사 19층',
     /* v185: 운영 기간 — 이 기간 밖의 날짜는 캘린더에서 닫힙니다. 비우면('') 오늘부터 horizonDays 동안 엽니다. */
     openFrom:'2026-11-02', openTo:'2026-11-30',
     workDays:[1,2,3,4],                       /* v185: 월~목 (금요일 휴무) */
@@ -2731,7 +2731,7 @@ function seatOfTime(p, t){
   const base = slotKey(t, p.id); const i = Math.round((toMin(t) - toMin(base)) / SUB_STEP_MIN);
   return programSeats(p)[i] || null;
 }
-/* 예약의 장소: 'KIC 본사 휴게실 · A 남자휴게실' */
+/* 예약의 장소: 'KIC 본사 19층 · A 남자휴게실' */
 function placeOf(p, b){
   const t = b && (b.slot_time || b.t); const seat = seatOfTime(p, t ? String(t).slice(0,5) : '');
   return seat && seat.name ? `${p.location} · ${seat.name}` : p.location;
