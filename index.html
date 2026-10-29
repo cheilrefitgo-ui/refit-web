@@ -1033,7 +1033,13 @@ const COMPANIES = [
     logo:'assets/img_2.d07b0739.png' },
 ];
 const companyName = id => (COMPANIES.find(c=>c.id===id)?.name) || id || '미지정';
-const companyHeadcount = id => COMPANIES.find(c=>c.id===id)?.headcount || 0;
+/* v229: 총 인원 — 운영 모드에서는 서버(company_overview.headcount = 발급된 계정 수, SQL 29)를 우선 쓰고,
+   서버 값이 없을 때만 HTML 의 고정값을 씁니다. */
+const companyHeadcount = id => {
+  const sv = Number(S.admin && S.admin.overview && S.admin.overview.headcount);
+  if(LIVE && Number.isFinite(sv) && sv > 0) return sv;
+  return COMPANIES.find(c=>c.id===id)?.headcount || 0;
+};
 
 const companyById = id => COMPANIES.find(c => c.id === id) || null;
 // 회사 이름 검색. 비워 두면 전체 목록을 돌려줍니다.
@@ -11055,12 +11061,13 @@ function platformAdminPane(){
   const cos = isMoti
     ? [...new Set(motiPeople.map(p => p.company || ''))].map(id => ({id, name: id ? companyName(id) : '미지정'}))
     : companiesInData();
+  const liveRows = (S.admin.rows||[]).filter(r => r.status !== 'canceled');   // v228: 취소 제외
   const countOf = id => isMoti ? motiPeople.filter(p => (p.company||'') === id).length
-                               : (S.admin.rows||[]).filter(r => (r.company||'')===id).length;
-  const total = isMoti ? motiPeople.length : (S.admin.rows||[]).length;
+                               : liveRows.filter(r => (r.company||'')===id).length;
+  const total = isMoti ? motiPeople.length : liveRows.length;
   const coBar = needFilter ? `<div class="cobar">
     <span class="cobar-label">${ico('apartment','cobar-ico')} 회사</span>
-    <button class="cochip ${AD.companyFilter==='all'?'on':''}" onclick="AD.companyFilter='all';render()">
+    <button class="cochip ${AD.companyFilter==='all'?'on':''}" onclick="AD.companyFilter='all';render()" title="${isMoti ? '임직원 수' : '전체 기간 예약 수 (취소 제외)'}">
       전체 <span class="cocount">${total}</span></button>
     ${cos.map(c => `<button class="cochip ${AD.companyFilter===c.id?'on':''}" onclick="AD.companyFilter='${esc(c.id)}';render()">
         ${esc(c.name)} <span class="cocount">${countOf(c.id)}</span></button>`).join('')}
