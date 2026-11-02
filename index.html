@@ -6281,7 +6281,68 @@ function reBar(rows){
 }
 
 /* ---------- 예약 목록 (기존 표) ---------- */
+/* v232: 미신청 — 발급된 계정 중 살아 있는 예약(신청됨·이용완료)이 하나도 없는 임직원 */
+function noBookingPeople(){
+  const members = (DB.memberList() || []).filter(m => m.email && m.email !== MASTER_BOOKING.email);
+  const hasLive = new Set((S.admin.rows||[]).filter(r => r.status !== 'canceled').map(r => String(r.email||'').toLowerCase()));
+  const canceledN = {};
+  (S.admin.rows||[]).forEach(r => { if(r.status === 'canceled'){ const e = String(r.email||'').toLowerCase(); canceledN[e] = (canceledN[e]||0) + 1; } });
+  return members.filter(m => !hasLive.has(String(m.email).toLowerCase()))
+    .map(m => Object.assign({}, m, {canceledN: canceledN[String(m.email).toLowerCase()] || 0}))
+    .sort((a,b) => String(a.empno||'').localeCompare(String(b.empno||'')) || String(a.name||'').localeCompare(String(b.name||'')));
+}
+function noBookingTab(){
+  if(LIVE && ACC.membersCache === undefined && !ACC.loading){ ACC.loading = true; setTimeout(() => loadAccountsLive(), 0); }
+  const q = (AD.bookingQuery || '').trim().toLowerCase();
+  let people = noBookingPeople();
+  if(q) people = people.filter(m => [m.name, m.email, m.empno, m.dept].some(v => String(v||'').toLowerCase().includes(q)));
+  const total = (DB.memberList() || []).filter(m => m.email && m.email !== MASTER_BOOKING.email).length;
+  const chips = [['all','전체'],['booked','신청됨'],['done','이용완료'],['survey','피드백 받음'],['none','미신청']].map(([k,l])=>
+      `<button class="mini" style="${AD.filter===k?'border-color:var(--accent);background:var(--accent-soft);color:var(--accent-dark);font-weight:600':''}"
+        onclick="AD.filter='${k}';render()">${l}</button>`).join('');
+  return `
+    <div class="toolbar">${chips}<div style="flex:1"></div>
+      <button class="mini" onclick="exportNoBookingCSV()">미신청 CSV 내보내기</button></div>
+    <div class="toolbar" style="margin-top:8px;gap:12px;flex-wrap:wrap">
+      <div class="filter-group" style="flex:1;min-width:220px">
+        <label class="filter-label" style="white-space:nowrap">검색</label>
+        <input class="filter-sel livesearch" id="bookingSearch" data-sel="#bookingSearch" autocomplete="off" type="text" placeholder="이름 · 사번 · 아이디 · 부서"
+               value="${esc(AD.bookingQuery||'')}" oninput="AD.bookingQuery=this.value;searchRender(this)">
+      </div>
+      <span class="filter-count">${people.length}명 미신청 <span style="color:var(--muted);font-weight:400">/ 발급 ${total}명</span></span>
+    </div>
+    <p class="card-sub" style="margin:8px 0 4px">계정은 발급됐지만 아직 프로그램을 신청하지 않은(또는 취소만 한) 임직원입니다.</p>
+    ${ACC.loading && !people.length ? `<div class="empty" style="margin-top:12px">계정 목록을 불러오는 중…</div>` : `
+    <table>
+      <thead><tr>
+        <th style="width:110px">사번</th><th style="width:120px">이름</th><th>아이디</th><th style="width:160px">부서</th>
+        <th style="width:150px">계정 상태</th><th style="width:110px">취소 이력</th>
+      </tr></thead>
+      <tbody>
+      ${people.length ? people.map(m => `
+        <tr>
+          <td style="font-family:ui-monospace,monospace">${esc(m.empno||'—')}</td>
+          <td><b>${esc(m.name||'—')}</b></td>
+          <td style="color:var(--muted);font-size:12.5px">${esc(m.email)}</td>
+          <td>${esc(m.dept || (m.baseline && m.baseline.dept) || '—')}</td>
+          <td style="font-size:12.5px">${m.mustChangePw ? '<span style="color:#A3431F">첫 로그인 전</span>' : (m.baselineAt ? '로그인함 · 사전 상담 완료' : '로그인함 · 사전 상담 전')}</td>
+          <td>${m.canceledN ? `취소 ${m.canceledN}건` : '<span style="color:var(--muted)">–</span>'}</td>
+        </tr>`).join('')
+      : `<tr><td colspan="6" class="empty">${q ? `"${esc(AD.bookingQuery)}" 에 해당하는 미신청 임직원이 없습니다.` : '발급된 모든 임직원이 신청을 마쳤습니다.'}</td></tr>`}
+      </tbody>
+    </table>`}`;
+}
+window.exportNoBookingCSV = () => {
+  const rows = noBookingPeople();
+  const head = ['사번','이름','아이디','부서','계정 상태','취소 이력'];
+  const body = rows.map(m => [m.empno||'', m.name||'', m.email||'', m.dept||'', m.mustChangePw ? '첫 로그인 전' : (m.baselineAt ? '로그인함·사전상담 완료' : '로그인함·사전상담 전'), m.canceledN||0]);
+  const csv = [head, ...body].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], {type:'text/csv;charset=utf-8'}));
+  a.download = `미신청_임직원_${iso(new Date())}.csv`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+
 function listTab(){
+  if(AD.filter === 'none') return noBookingTab();   // v232
   let rows = adminRows().filter(r => AD.filter==='all' ? true
     : AD.filter==='survey' ? !!r.survey : r.status===AD.filter);
 
@@ -6313,7 +6374,7 @@ function listTab(){
 
   return `
     <div class="toolbar">
-      ${[['all','전체'],['booked','신청됨'],['done','이용완료'],['survey','피드백 받음']].map(([k,l])=>
+      ${[['all','전체'],['booked','신청됨'],['done','이용완료'],['survey','피드백 받음'],['none','미신청']].map(([k,l])=>
         `<button class="mini" style="${AD.filter===k?'border-color:var(--accent);background:var(--accent-soft);color:var(--accent-dark);font-weight:600':''}"
           onclick="AD.filter='${k}';render()">${l}</button>`).join('')}
       <div style="flex:1"></div>
