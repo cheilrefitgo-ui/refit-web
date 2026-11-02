@@ -6930,8 +6930,9 @@ function intakeTab(){
   const rows = (pf==='all' ? all : all.filter(r => (r.program||'')===pf))
                  .filter(r => r.intake && Object.keys(r.intake).length);
 
-  const qs = intakeQsFor(pf==='all' ? (progIds.length?progIds:PROGRAMS.map(p=>p.id)) : [pf]);
-  const consentN = rows.filter(r => r.intake && r.intake.consent).length;
+  const qs = intakeQsFor(pf==='all' ? (progIds.length?progIds:PROGRAMS.map(p=>p.id)) : [pf])
+               .filter(q => q.id !== 'consent');   // v230: 사전 상담은 가입 때 받으므로 예약 시점 동의 카드는 표시하지 않음
+  const consentN = rows.filter(r => r.intake && (r.intake.consent_base || r.intake.consent)).length;
   const riskRows = rows.filter(r => riskTags(r.intake).length);
   const noteN    = rows.filter(r => hasVal(r.intake && r.intake.note)).length;
 
@@ -10244,6 +10245,14 @@ function donutChart(items, opt = {}) {
   /* 예약 전 가이드 창 */
   body.gd-open{overflow:hidden}
   #guidebox{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:20px}
+  /* v231: 이벤트 팝업 — PC 오른쪽 위(퀵메뉴 왼쪽), 모바일 가운데 위 */
+  #eventbox{position:fixed;top:76px;right:96px;z-index:130;width:340px;animation:gdIn .18s ease-out}
+  .ev{position:relative;border-radius:14px;overflow:hidden;box-shadow:0 18px 48px rgba(20,22,26,.28);background:#fff}
+  .ev img{display:block;width:100%;height:auto}
+  .ev-hit{position:absolute;bottom:0;height:7%;width:50%;border:0;background:transparent;cursor:pointer;padding:0}
+  .ev-hit-l{left:0}.ev-hit-r{right:0}
+  .ev-hit:focus-visible{outline:2px solid #4C5A82;outline-offset:-3px}
+  @media (max-width:700px){ #eventbox{top:64px;right:50%;transform:translateX(50%);width:min(92vw,340px)} }
   .gd-dim{position:absolute;inset:0;background:rgba(20,22,26,.42);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
   .gd{position:relative;width:min(440px,100%);max-height:calc(100vh - 40px);overflow:auto;
     background:#fff;border:1px solid #E6E9EF;border-radius:16px;padding:22px 22px 18px;
@@ -11651,7 +11660,7 @@ function empTodayPane(){
   // 예약 목록은 '나의 예약' 화면에서 봅니다. Home 에서는 겹쳐 보여 주지 않습니다.
   const q = HOME_QUICK ? quick : '';
   const steps = homeExtraHTML(next);
-  if(!next) setTimeout(() => guideMaybeOpen(), 250);   // 예약 전 가이드 (처음 한 번)
+  if(!next) setTimeout(() => { guideMaybeOpen(); eventMaybeOpen(); }, 250);   // 예약 전 가이드 (처음 한 번) + 이벤트 팝업 (v231)
   return `<section class="pane${HOME_STEPS_FIRST ? ' home-steps-first' : ''}">${hero}${recheckBanner}${
     HOME_STEPS_FIRST ? steps + q : q + steps}</section>`;
 }
@@ -11684,6 +11693,29 @@ function stepArt(kind){
    '다시 보지 않기'를 누르면 이 계정(브라우저)에서는 더 뜨지 않고,
    홈의 '이용 가이드' 링크로 언제든 다시 열 수 있습니다.
    ------------------------------------------------------------ */
+/* v231: 이벤트 팝업 — Home 오른쪽 위. 이미지 안의 '오늘 하루 보지 않기' · '닫기' 자리를 눌러 닫습니다. */
+const EVENT_POPUP = { enabled:true, until:'2026-12-01', key:'eventHide:' };   // until 다음 날부터 자동으로 안 보임
+const EVENT_POPUP_IMG = 'assets/event_popup.eafa5c7b.jpg';
+function eventTodayKey(){ return EVENT_POPUP.key + iso(new Date()); }
+window.eventMaybeOpen = () => {
+  if(!EVENT_POPUP.enabled || document.getElementById('eventbox')) return;
+  if(iso(new Date()) > EVENT_POPUP.until) return;
+  if(!(S.nav.emp === 'home' || S.nav.emp === 'home.today')) return;
+  if(window.innerWidth <= 700 && document.getElementById('guidebox')) return;   // 모바일: 안내 창을 닫은 뒤에 보여 줌
+  try{ if(KSTORE.getItem(eventTodayKey()) === '1' || sessionStorage.getItem('eventClosed') === '1') return; }catch(e){}
+  const box = document.createElement('div');
+  box.id = 'eventbox';
+  box.innerHTML = `<div class="ev" role="dialog" aria-label="만족도 조사 이벤트 안내">
+      <img src="${EVENT_POPUP_IMG}" alt="만족도 조사 참여하고 닥터신 베개 선물 받으세요. 참여 기간 11월 30일까지, 당첨자 발표 12월 1일">
+      <button type="button" class="ev-hit ev-hit-l" onclick="closeEvent(true)" aria-label="오늘 하루 보지 않기"></button>
+      <button type="button" class="ev-hit ev-hit-r" onclick="closeEvent(false)" aria-label="닫기"></button>
+    </div>`;
+  document.body.appendChild(box);
+};
+window.closeEvent = (today) => {
+  try{ if(today) KSTORE.setItem(eventTodayKey(), '1'); else sessionStorage.setItem('eventClosed', '1'); }catch(e){}
+  document.getElementById('eventbox')?.remove();
+};
 function guideKey(){ return 'guideSeen:' + (S.auth.user?.email || 'anon'); }
 window.guideMaybeOpen = () => {
   if(document.getElementById('guidebox')) return;
@@ -11734,6 +11766,7 @@ window.closeGuide = () => {
   document.removeEventListener('keydown', box._esc);
   document.body.classList.remove('gd-open');
   box.remove();
+  setTimeout(() => { try{ eventMaybeOpen(); }catch(e){} }, 150);   // v231: 안내 창 닫힌 뒤 이벤트 팝업 (모바일)
 };
 
 function homeExtraHTML(next){
@@ -13597,6 +13630,7 @@ function logoMark(){
 }
 
 function render(){ window.__appReady = true;
+  if(!(S.auth.user && !S.admin.authed && (S.nav.emp === 'home' || S.nav.emp === 'home.today'))) document.getElementById('eventbox')?.remove();   // v231
   requestAnimationFrame(bmPlacePopovers);   // 바디맵 말풍선 위치 (DOM 이 바뀐 뒤)
   const r = route();
   let body;
