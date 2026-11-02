@@ -1826,7 +1826,54 @@ const SURVEY = [
 const LIVE = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 /* v142 KIC 실사용 빌드: 테스트 계정·시연 데이터·데모 안내 없이 바로 씁니다. */
 const KIC_RELEASE = true;
-const sb = LIVE ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+/* v236: 로그인 만료 감지
+   - 접속 토큰(1시간)은 라이브러리가 자동 갱신하지만, 절전·네트워크 끊김으로 갱신에 실패하면
+     화면은 그대로인데 서버에는 비로그인(anon)으로 요청이 가서 'permission denied' 가 납니다.
+   - 아래 fetch 래퍼가 401/403 응답을 보면 세션이 남아 있는지 확인하고, 없으면 로그인 화면으로 보냅니다.
+   - 우리가 직접 로그아웃할 때(SESS.own)는 알림을 띄우지 않습니다. */
+/* v237: Supabase 인증(로그인·가입·비밀번호) 영문 오류를 한국어 문장으로 */
+function authErrKo(error, fallback){
+  const m = typeof error === 'string' ? error : String((error && (error.message || error.msg)) || '');
+  const sec = m.match(/after (\d+) seconds?/i);
+  const len = m.match(/at least (\d+) characters?/i);
+  if(/invalid login credentials|invalid_credentials|invalid grant/i.test(m)) return '이메일 또는 비밀번호가 올바르지 않습니다.';
+  if(/email not confirmed/i.test(m))                      return '이메일 인증이 완료되지 않은 계정입니다. 운영 담당자에게 문의해 주세요.';
+  if(/already (been )?registered|already exists|user_already_exists/i.test(m)) return '이미 가입된 이메일입니다.';
+  if(/user not found|user_not_found/i.test(m))            return '등록되지 않은 계정입니다.';
+  if(len)                                                 return `비밀번호는 ${len[1]}자 이상이어야 합니다.`;
+  if(/weak_password|password should contain|password is known to be weak|too weak/i.test(m)) return '비밀번호가 너무 단순합니다. 영문·숫자·기호를 섞어 주세요.';
+  if(/different from the old password|same_password/i.test(m)) return '새 비밀번호는 기존 비밀번호와 달라야 합니다.';
+  if(/invalid (email|format)|unable to validate email|email address.*invalid/i.test(m)) return '이메일 형식이 올바르지 않습니다.';
+  if(/signups? not allowed|signup_disabled|email_provider_disabled/i.test(m)) return '현재 회원가입이 막혀 있습니다. 운영 담당자에게 문의해 주세요.';
+  if(sec)                                                 return `요청이 너무 잦습니다. ${sec[1]}초 뒤 다시 시도해 주세요.`;
+  if(/rate limit|too many requests|over_request_rate_limit|over_email_send_rate_limit/i.test(m)) return '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.';
+  if(/jwt|session missing|refresh_token|invalid token|token (is )?expired|not authenticated/i.test(m)) return '로그인이 만료되었습니다. 다시 로그인해 주세요.';
+  if(/permission denied|not authorized|42501/i.test(m))   return '권한이 없거나 로그인이 만료되었습니다. 다시 로그인한 뒤 시도해 주세요.';
+  if(/failed to fetch|networkerror|load failed|network request failed|timeout/i.test(m)) return '서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.';
+  if(/^\s*$/.test(m)) return fallback || '처리하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+  if(!/[a-zA-Z]{3}/.test(m)) return m;                  // 이미 한국어면 그대로
+  return (fallback || '처리하지 못했습니다.') + ' (오류: ' + m + ')';
+}
+const SESS = { own:false, last:0 };
+async function sessQuiet(fn){ SESS.own = true; try{ return await fn(); } finally{ SESS.own = false; } }
+async function authWatchFetch(input, init){
+  const res = await fetch(input, init);
+  if(res.status === 401 || res.status === 403){
+    try{
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if(!url.includes('/auth/v1/')){                       // 로그인 시도 자체의 실패는 제외
+        const txt = await res.clone().text();
+        if(/permission denied|jwt|invalid token|PGRST30[01]/i.test(txt)) checkSessionAfterDenied();
+      }
+    }catch(_){}
+  }
+  return res;
+}
+async function checkSessionAfterDenied(){
+  try{ const {data} = await sb.auth.getSession(); if(!data.session) sessionExpired(); }catch(_){}
+}
+const sb = LIVE ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global:{ fetch: authWatchFetch } }) : null;
+if(sb) sb.auth.onAuthStateChange((ev) => { if(ev === 'SIGNED_OUT' && !SESS.own) sessionExpired(); });
 
 const local = {
   all(){ try{ return JSON.parse(KSTORE.getItem('bookings')||'[]'); }catch{ return []; } },
@@ -2052,7 +2099,7 @@ const DB = {
   async signIn(email, password){
     if(!LIVE) return {ok:true};
     const {error} = await sb.auth.signInWithPassword({email, password});
-    return error ? {ok:false, msg:error.message} : {ok:true};
+    return error ? {ok:false, msg:authErrKo(error, '로그인하지 못했습니다.')} : {ok:true};   // v237
   },
 
   // 관리자 계정 회원가입.
@@ -2079,7 +2126,7 @@ const DB = {
     }
     // 실서비스: Auth 가입 + admin_roles 등록
     const {data, error} = await sb.auth.signUp({email:e, password});
-    if(error) return {ok:false, msg:error.message};
+    if(error) return {ok:false, msg:authErrKo(error, '가입하지 못했습니다.')};   // v237
     const {error:e2} = await sb.from('admin_roles').insert({
       email:e, role,
       company_id:   role==='company' ? company : null,
@@ -2226,7 +2273,7 @@ const DB = {
       return {ok:true};
     }
     const {error} = await sb.auth.updateUser({data:{name, phone, sex:profile.sex, age_band:profile.age, birth_year:profile.birth_year, must_change_pw:false}});
-    if(error) return {ok:false, msg:error.message};
+    if(error) return {ok:false, msg:authErrKo(error, '정보를 저장하지 못했습니다.')};   // v237
     await this.syncEmployee(name, (await this.currentUser())?.company || null, phone);
     return {ok:true};
   },
@@ -2236,7 +2283,7 @@ const DB = {
     const v = String(cemail||'').trim().toLowerCase();
     if(!LIVE){ const s = this.memberStore.session(); if(!s) return {ok:false}; const m = this.memberStore.all(); if(m[s.email]){ m[s.email].contactEmail = v; this.memberStore.save(m); } return {ok:true}; }
     const {error} = await sb.rpc('set_contact_email', {p_email: v || null});
-    return error ? {ok:false, msg:error.message} : {ok:true};
+    return error ? {ok:false, msg:authErrKo(error, '알림 이메일을 저장하지 못했습니다.')} : {ok:true};   // v237
   },
   async getContactEmail(){
     if(!LIVE){ const s = this.memberStore.session(); const m = this.memberStore.all(); return (s && m[s.email] && m[s.email].contactEmail) || ''; }
@@ -2257,8 +2304,8 @@ const DB = {
     const {error} = await sb.auth.signInWithPassword({email:e, password:curPw});
     if(error) return {ok:false, msg:'이메일 또는 현재 비밀번호가 올바르지 않습니다.'};
     const {error:e2} = await sb.auth.updateUser({password:newPw, data:{must_change_pw:false}});
-    if(!keepSession){ try{ await sb.auth.signOut(); }catch(_){} }   // v178: 첫 로그인 설정에서는 로그인 유지
-    if(e2) return {ok:false, msg:'비밀번호를 바꾸지 못했습니다: ' + e2.message};
+    if(!keepSession){ try{ await sessQuiet(() => sb.auth.signOut()); }catch(_){} }   // v178: 첫 로그인 설정에서는 로그인 유지
+    if(e2) return {ok:false, msg:authErrKo(e2, '비밀번호를 바꾸지 못했습니다.')};   // v237
     return {ok:true};
   },
 
@@ -2403,7 +2450,7 @@ const DB = {
       return {ok:true};
     }
     const {error} = await sb.auth.updateUser({ data:{ company: companyId } });
-    if(error) return {ok:false, msg:error.message};
+    if(error) return {ok:false, msg:authErrKo(error, '회사 연결에 실패했습니다.')};   // v237
     const u = await this.currentUser();
     try{ await sb.rpc('ensure_employee',
       {p_name:u?.name || '', p_company:companyId, p_phone:null}); }
@@ -2437,7 +2484,7 @@ const DB = {
         this.memberStore.setSession({...s, name});
       }else{
         const {error} = await sb.auth.updateUser({data:{name}});
-        if(error) return {ok:false, msg:error.message};
+        if(error) return {ok:false, msg:authErrKo(error, '이름을 저장하지 못했습니다.')};   // v237
         await this.syncEmployee(name, (await this.currentUser())?.company || null);
       }
       const cur = (await this.getBaseline()) || {ans:{}, at:new Date().toISOString(), history:[]};
@@ -2453,7 +2500,7 @@ const DB = {
 
   async memberSignOut(){
     if(!LIVE){ this.memberStore.setSession(null); return; }
-    await sb.auth.signOut();
+    await sessQuiet(() => sb.auth.signOut());   // v236
   },
 
   // 로그인한 본인의 예약을 이메일로 불러옵니다 (코드 대신).
@@ -2476,7 +2523,7 @@ const DB = {
     return !!data.session;
   },
   async signOut(){
-    if(LIVE) await sb.auth.signOut();
+    if(LIVE) await sessQuiet(() => sb.auth.signOut());   // v236
     else KSTORE.removeItem('adminSession');
   },
 
@@ -7568,6 +7615,27 @@ window.firstPwBack = async (fromHistory) => {
 window.addEventListener('popstate', () => {
   if(S.auth.user && S.auth.user.mustChangePw) firstPwBack(true);
 });
+/* v236: 로그인 만료 — 서버 세션이 사라진 것을 알아챘을 때 (fetch 래퍼 · onAuthStateChange 에서 호출) */
+const SESSION_EXPIRED_MSG = '로그인이 만료되었습니다. 다시 로그인해 주세요.';
+function sessionExpired(){
+  const wasAdmin = S.admin.authed, wasMember = !!S.auth.user;
+  if(!wasAdmin && !wasMember) return;
+  const now = Date.now(); if(now - SESS.last < 1500) return; SESS.last = now;   // fetch 래퍼와 onAuthStateChange 가 동시에 부를 때 한 번만
+  if(wasAdmin){
+    S.admin.authed = false; S.admin.role = null; S.admin.trainerName = '';
+    AD.pw = ''; AD.msg = SESSION_EXPIRED_MSG;
+    if(!location.hash.startsWith('#/admin')) location.hash = '#/admin';
+  }
+  if(wasMember){
+    S.auth.user = null; S.auth.checked = true;
+    try{ KSTORE.removeItem('authKeep'); sessionStorage.removeItem('authAlive'); }catch(e){}
+    resetUserData(); resetAll();
+    AUTH.mode = 'login'; AUTH.pw = ''; AUTH.pw2 = ''; AUTH.msg = SESSION_EXPIRED_MSG;
+    if(!wasAdmin && location.hash) location.hash = '';
+  }
+  toast(SESSION_EXPIRED_MSG);
+  render(); window.scrollTo(0,0);
+}
 window.memberLogout = async (skipConfirm) => {
   if(skipConfirm !== true && !confirm('로그아웃할까요?')) return;
   await DB.memberSignOut();
@@ -7637,6 +7705,7 @@ window.adminLogin = async () => {
     KSTORE.setItem('adminSession','1');   // ★ 로그인 상태 기록
     S.admin.authed = true; AD.pw=''; AD.msg='';
     S.admin.role = await DB.myRole();
+    await loadAdminTrainerName();   // v235
     await refreshAdmin();
     return;
   }
@@ -7700,6 +7769,7 @@ window.adminSignup = async () => {
   KSTORE.setItem('adminSession','1');
   S.admin.authed = true; AD.pw=''; AD.pw2=''; AD.invite=''; AD.msg='';
   S.admin.role = await DB.myRole();
+  await loadAdminTrainerName();   // v235
   if(AD.regCompany) AD.companyFilter = AD.regCompany;
   await refreshAdmin();
 };
@@ -7768,6 +7838,7 @@ window.mark = async (id, status) => {
   await refreshAdmin();
 };
 async function refreshAdmin(){
+  if(S.admin.authed && S.admin.role === 'operator' && Object.keys(MOTI_PENDING).length){ motiFlushPending(); toast('로그인 전에 저장하지 못한 체형 분석 결과를 다시 저장했습니다.'); }   // v236
   try{
     if(S.admin.role === 'company'){
       // 기업 관리자: 집계 + (상담 응답을 뺀) 자기 회사 예약 목록
@@ -7915,6 +7986,7 @@ const NAV = {
   company: [
     { id:'dash',   label:'운영 요약',     icon:'dashboard' },
     { id:'people', label:'참여 현황',     icon:'groups' },
+    { id:'cal',    label:'예약 캘린더',   icon:'calendar_month' },
     { id:'sat',    label:'만족도',       icon:'monitoring' },
     { id:'health', label:'건강 리포트',   icon:'bar_chart' },
   ],
@@ -7937,6 +8009,19 @@ const NAV = {
     ]},
   ],
 };
+
+/* v235: 운동처방사용 플랫폼 관리자 — admin_roles.trainer_name 이 있는 operator.
+   Dashboard · 운동처방사 관리(세션 현황 · 운동처방사 경력)만 쓰고, 담당 배정 변경은 운영 총괄만 합니다. */
+async function loadAdminTrainerName(){
+  S.admin.trainerName = '';
+  if(S.admin.role !== 'operator') return;
+  try{ S.admin.trainerName = (await DB.myTrainer()) || ''; }catch(e){ console.error(e); }
+}
+const isTrainerAdmin = () => S.admin.role === 'operator' && !!S.admin.trainerName;
+const TRAINER_ADMIN_SECS = ['dash','trainers.cal','trainers.detail'];
+function platformNavFor(){
+  return isTrainerAdmin() ? NAV.platform.filter(i => ['dash','trainers'].includes(i.id)) : NAV.platform;
+}
 
 /* 메뉴 이동 */
 // 나의 예약 목록이 있어야 그릴 수 있는 임직원 화면들
@@ -8241,6 +8326,9 @@ const TR_COLORS = ['#4C5A82','#2e8b57','#3f6bd6','#b7791f','#a3467c',
 
 /* 운동처방사마다 직접 정한 색. settings('trainer_colors') 에 저장됩니다. */
 const TR_COLOR_SET = {};
+/* v234: 이름별 기본색 — 저장된 색(trainer_colors)이 없을 때도 플랫폼·기업관리자 달력이 같은 색을 씁니다. */
+const TR_NAME_DEFAULT = {'장혜윤':'#3f6bd6', '강태이':'#8a63d2', '김정환':'#2e8b57'};
+const trColorOf = (name, i) => TR_COLOR_SET[name] || TR_NAME_DEFAULT[name] || TR_COLORS[i % TR_COLORS.length];
 
 /* 색을 고르는 중인 운동처방사 (한 번에 한 명) */
 let TR_PICK = null;
@@ -8679,7 +8767,7 @@ function trainerPane(scopeRows){
   const colorOf = {};
   // 직접 정한 색이 있으면 그 색을 씁니다.
   list.forEach((t,i) => colorOf[t.name] =
-    TR_COLOR_SET[t.name] || TR_COLORS[i % TR_COLORS.length]);
+    trColorOf(t.name, i));
 
   const allEvs = trEvents(all);
   const {from, to} = trRange();
@@ -8891,9 +8979,9 @@ function trainerSection(scopeRows, which){
   const colorOf = {};
   // 직접 정한 색이 있으면 그 색을 씁니다.
   list.forEach((t,i) => colorOf[t.name] =
-    TR_COLOR_SET[t.name] || TR_COLORS[i % TR_COLORS.length]);
+    trColorOf(t.name, i));
   // v141: 상세 통계 카드(trainerDetail)는 쓰지 않습니다. 배정 + 테스트용 운동처방사 카드만.
-  return hostAssignHTML() + trainerCardEditorHTML();
+  return (isTrainerAdmin() ? '' : hostAssignHTML()) + trainerCardEditorHTML();   // v235: 운동처방사 계정은 배정 변경 불가
 }
 
 /* 임직원에게 보이는 운동처방사 카드 — 미리보기 + 편집 (사진은 따로 올림) */
@@ -8959,6 +9047,7 @@ function companyAdminPane(){
 
   if(sec === 'dash'){          title='운영 요약';     sub='우리 회사 웰니스 프로그램 운영 현황';   body = companyDashBody(); }
   else if(sec === 'people'){   title='참여 현황';     sub='누가 얼마나 참여하고 있는지';         body = coPeoplePane(); }
+  else if(sec === 'cal'){      title='예약 캘린더';    sub='누가 언제 예약했는지 — 운동처방사별 색';  body = `<div class="co-cal">${trainerPane(rows)}</div>`; }   // v233
   else if(sec === 'sat'){      title='만족도';        sub='프로그램 만족도와 추천 의향';         body = coSatPane(); }
   else if(sec === 'health'){   title='건강 리포트';    sub='사전 상담 응답 집계 (개인 응답 제외)';  body = coHealthPane(); }
   else { S.nav.co = 'dash';    title='운영 요약';                                          body = companyDashBody(); }
@@ -10307,13 +10396,16 @@ function donutChart(items, opt = {}) {
   body.gd-open{overflow:hidden}
   #guidebox{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:20px}
   /* v231: 이벤트 팝업 — PC 오른쪽 위(퀵메뉴 왼쪽), 모바일 가운데 위 */
-  #eventbox{position:fixed;top:76px;right:96px;z-index:130;width:340px;animation:gdIn .18s ease-out}
-  .ev{position:relative;border-radius:14px;overflow:hidden;box-shadow:0 18px 48px rgba(20,22,26,.28);background:#fff}
+  #eventbox{position:fixed;inset:0;z-index:125;display:flex;align-items:center;justify-content:center;padding:20px}
+  .ev-dim{position:absolute;inset:0;background:rgba(20,22,26,.42);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
+  .ev{position:relative;width:min(400px,100%);max-height:calc(100vh - 40px);border-radius:16px;overflow:hidden;
+    box-shadow:0 24px 60px rgba(20,22,26,.28);background:#fff;animation:gdIn .18s ease-out}
   .ev img{display:block;width:100%;height:auto}
   .ev-hit{position:absolute;bottom:0;height:7%;width:50%;border:0;background:transparent;cursor:pointer;padding:0}
   .ev-hit-l{left:0}.ev-hit-r{right:0}
   .ev-hit:focus-visible{outline:2px solid #4C5A82;outline-offset:-3px}
-  @media (max-width:700px){ #eventbox{top:64px;right:50%;transform:translateX(50%);width:min(92vw,340px)} }
+  .co-cal .trcolor, .co-cal .trcolor-a{display:none}   /* v233: 기업관리자는 색 편집 없이 보기만 */
+  @media (max-width:700px){ .ev{width:min(94vw,400px)} }
   .gd-dim{position:absolute;inset:0;background:rgba(20,22,26,.42);-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
   .gd{position:relative;width:min(440px,100%);max-height:calc(100vh - 40px);overflow:auto;
     background:#fff;border:1px solid #E6E9EF;border-radius:16px;padding:22px 22px 18px;
@@ -10870,8 +10962,6 @@ function aiSummaryHTML(o){
     <div class="card-h">${ico('auto_awesome','')} 종합 의견
       <span class="card-sub">자동 요약 · 참고용</span></div>
     <ul class="aiop-list">${out.join('')}</ul>
-    <p class="sub" style="margin:10px 0 0">
-      이 글은 위 숫자를 규칙에 따라 정리한 것입니다. 최종 판단은 담당자가 해 주세요.</p>
   </div>`;
 }
 
@@ -11103,6 +11193,7 @@ function pfStatsPane(seg0){
 }
 
 function platformAdminPane(){
+  if(isTrainerAdmin() && !TRAINER_ADMIN_SECS.includes(S.nav.pf)) S.nav.pf = 'dash';   // v235
   const sec = S.nav.pf;
   const rows = adminRows();
   let body = '', title = '', sub = '';
@@ -11147,7 +11238,7 @@ function platformAdminPane(){
   const refreshed = S.admin.refreshedAt
     ? `<span class="refreshed">${pad(S.admin.refreshedAt.getHours())}:${pad(S.admin.refreshedAt.getMinutes())} 기준</span>` : '';
 
-  return adminShell('pf', '플랫폼 관리자', CONFIG.brand, NAV.platform, sec,
+  return adminShell('pf', isTrainerAdmin() ? `운동처방사 · ${esc(S.admin.trainerName)}` : '플랫폼 관리자', CONFIG.brand, platformNavFor(), sec,
                     title, sub, coBar + body, refreshed);
 }
 
@@ -11721,7 +11812,7 @@ function empTodayPane(){
   // 예약 목록은 '나의 예약' 화면에서 봅니다. Home 에서는 겹쳐 보여 주지 않습니다.
   const q = HOME_QUICK ? quick : '';
   const steps = homeExtraHTML(next);
-  if(!next) setTimeout(() => { guideMaybeOpen(); eventMaybeOpen(); }, 250);   // 예약 전 가이드 (처음 한 번) + 이벤트 팝업 (v231)
+  if(!next) setTimeout(() => { if(!eventMaybeOpen()) guideMaybeOpen(); }, 250);   // v233: 이벤트 팝업 먼저 → 닫으면 예약 전 가이드
   return `<section class="pane${HOME_STEPS_FIRST ? ' home-steps-first' : ''}">${hero}${recheckBanner}${
     HOME_STEPS_FIRST ? steps + q : q + steps}</section>`;
 }
@@ -11758,28 +11849,32 @@ function stepArt(kind){
 const EVENT_POPUP = { enabled:true, until:'2026-12-01', key:'eventHide:' };   // until 다음 날부터 자동으로 안 보임
 const EVENT_POPUP_IMG = 'assets/event_popup.eafa5c7b.jpg';
 function eventTodayKey(){ return EVENT_POPUP.key + iso(new Date()); }
-window.eventMaybeOpen = () => {
-  if(!EVENT_POPUP.enabled || document.getElementById('eventbox')) return;
-  if(iso(new Date()) > EVENT_POPUP.until) return;
-  if(!(S.nav.emp === 'home' || S.nav.emp === 'home.today')) return;
-  if(window.innerWidth <= 700 && document.getElementById('guidebox')) return;   // 모바일: 안내 창을 닫은 뒤에 보여 줌
-  try{ if(KSTORE.getItem(eventTodayKey()) === '1' || sessionStorage.getItem('eventClosed') === '1') return; }catch(e){}
+window.eventMaybeOpen = () => {           // v233: 열었으면 true — 안내 창은 이벤트를 닫은 뒤에 이어서 뜹니다
+  if(!EVENT_POPUP.enabled || document.getElementById('eventbox')) return false;
+  if(iso(new Date()) > EVENT_POPUP.until) return false;
+  if(!(S.nav.emp === 'home' || S.nav.emp === 'home.today')) return false;
+  try{ if(KSTORE.getItem(eventTodayKey()) === '1' || sessionStorage.getItem('eventClosed') === '1') return false; }catch(e){}
   const box = document.createElement('div');
   box.id = 'eventbox';
-  box.innerHTML = `<div class="ev" role="dialog" aria-label="만족도 조사 이벤트 안내">
+  box.innerHTML = `<div class="ev-dim" onclick="closeEvent(false)"></div><div class="ev" role="dialog" aria-modal="true" aria-label="만족도 조사 이벤트 안내">
       <img src="${EVENT_POPUP_IMG}" alt="만족도 조사 참여하고 닥터신 베개 선물 받으세요. 참여 기간 11월 30일까지, 당첨자 발표 12월 1일">
       <button type="button" class="ev-hit ev-hit-l" onclick="closeEvent(true)" aria-label="오늘 하루 보지 않기"></button>
       <button type="button" class="ev-hit ev-hit-r" onclick="closeEvent(false)" aria-label="닫기"></button>
     </div>`;
   document.body.appendChild(box);
+  box._esc = e => { if(e.key === 'Escape') closeEvent(false); };
+  document.addEventListener('keydown', box._esc);
+  return true;
 };
 window.closeEvent = (today) => {
   try{ if(today) KSTORE.setItem(eventTodayKey(), '1'); else sessionStorage.setItem('eventClosed', '1'); }catch(e){}
-  document.getElementById('eventbox')?.remove();
+  const box = document.getElementById('eventbox');
+  if(box){ document.removeEventListener('keydown', box._esc); box.remove(); }
+  setTimeout(() => { try{ guideMaybeOpen(); }catch(e){} }, 120);   // v233: 이벤트 다음에 안내 창
 };
 function guideKey(){ return 'guideSeen:' + (S.auth.user?.email || 'anon'); }
 window.guideMaybeOpen = () => {
-  if(document.getElementById('guidebox')) return;
+  if(document.getElementById('guidebox') || document.getElementById('eventbox')) return;   // v233: 이벤트 팝업이 떠 있으면 대기
   if(KSTORE.getItem(guideKey()) === '1') return;
   if(!(S.nav.emp === 'home' || S.nav.emp === 'home.today')) return;
   openGuide();
@@ -11827,7 +11922,6 @@ window.closeGuide = () => {
   document.removeEventListener('keydown', box._esc);
   document.body.classList.remove('gd-open');
   box.remove();
-  setTimeout(() => { try{ eventMaybeOpen(); }catch(e){} }, 150);   // v231: 안내 창 닫힌 뒤 이벤트 팝업 (모바일)
 };
 
 function homeExtraHTML(next){
@@ -13075,7 +13169,7 @@ async function loadMotiAdmin(){
     MOTI_CACHE.people = (data || []).map(x => ({email:x.email, name:x.name, company:x.company}));
     (data || []).forEach(x => { const e = String(x.email).toLowerCase();
       if(x.status) MOTI_CACHE.recs[e] = Object.assign(MOTI_CACHE.recs[e] || {email:e}, {status:x.status, measured:x.measured, grade:x.grade, at:x.at, _light:true});
-      else delete MOTI_CACHE.recs[e]; });
+      else if(!MOTI_PENDING[e]) delete MOTI_CACHE.recs[e]; });   // v236: 보관 중인 기록은 유지
   }catch(err){ console.error(err); toast('체형 분석 목록을 불러오지 못했습니다.'); }
   render();
 }
@@ -13093,12 +13187,29 @@ async function loadMotiRecord(email){
 }
 function motiSaveAll(all){ KSTORE.setItem(MOTI_KEY, JSON.stringify(all)); }
 function motiGet(email){ return motiAll()[String(email || '').toLowerCase()] || null; }
+const MOTI_PENDING = {};   // v236: 로그인 만료로 못 보낸 저장 (재로그인 뒤 motiFlushPending 이 다시 보냄)
+async function motiPutLive(e, rec){
+  try{
+    const {data} = await sb.auth.getSession();          // 만료됐으면 여기서 자동 갱신 시도
+    if(!data.session){ MOTI_PENDING[e] = rec; sessionExpired(); return; }
+    const {error} = await sb.rpc('moti_admin_put', {p_email:e, p_status:rec.status || 'draft', p_data:rec});
+    if(!error){ delete MOTI_PENDING[e]; return; }
+    console.error(error);
+    if(/permission denied|jwt/i.test(error.message || '')){
+      const {data:again} = await sb.auth.getSession();
+      if(!again.session){ MOTI_PENDING[e] = rec; sessionExpired(); return; }
+    }
+    toast('서버 저장 실패: ' + error.message);
+  }catch(err){ console.error(err); toast('서버 저장 실패: ' + (err.message || err)); }
+}
+function motiFlushPending(){
+  Object.keys(MOTI_PENDING).forEach(e => { const rec = MOTI_PENDING[e]; delete MOTI_PENDING[e]; motiPut(rec); });
+}
 function motiPut(rec){
   const e = String(rec.email).toLowerCase();
   if(LIVE){
     MOTI_CACHE.recs[e] = rec;
-    sb.rpc('moti_admin_put', {p_email:e, p_status:rec.status || 'draft', p_data:rec})
-      .then(({error}) => { if(error){ console.error(error); toast('서버 저장 실패: ' + error.message); } });
+    motiPutLive(e, rec);
     return;
   }
   const all = motiAll(); all[e] = rec; motiSaveAll(all); }
@@ -13854,7 +13965,7 @@ window.seedDemoKIC = (force) => {
 };
 
 async function boot(){
-  console.info("[refit] booking v217");
+  console.info("[refit] booking v238");
   // 폴드·플립을 펼치거나 접을 때, 회전할 때: 폭이 바뀌면 화면을 다시 그립니다 (절대 좌표로 놓인 말풍선·차트가 어긋나지 않게)
   { let lastW = window.innerWidth, t = null;
     window.addEventListener('resize', () => { if(Math.abs(window.innerWidth - lastW) < 40) return;
@@ -13895,6 +14006,7 @@ async function boot(){
     S.admin.authed = await DB.session();
     if(S.admin.authed){
       S.admin.role = await DB.myRole();
+      await loadAdminTrainerName();   // v235
       if(S.admin.role === 'company') S.admin.companyId = await DB.myCompany();
       return refreshAdmin();
     }
