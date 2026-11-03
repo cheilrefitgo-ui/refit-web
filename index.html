@@ -7744,6 +7744,7 @@ window.adminLogin = async () => {
   }
   S.admin.authed = true; AD.pw = ''; AD.msg = '';
   S.admin.role = role;
+  await loadAdminTrainerName();   // v241: 계정이 바뀌면 운동처방사 여부도 다시 판정 (이전 로그인 값이 남던 버그 수정)
   await refreshAdmin();
 };
 
@@ -7783,7 +7784,7 @@ window.adminSignup = async () => {
   if(AD.regCompany) AD.companyFilter = AD.regCompany;
   await refreshAdmin();
 };
-window.adminLogout = async () => { await DB.signOut(); S.admin.authed = false; render(); };
+window.adminLogout = async () => { await DB.signOut(); S.admin.authed = false; S.admin.role = null; S.admin.trainerName = ''; S.admin.rows = []; AD.sel.clear(); render(); };   // v241: 상태 초기화
 window.toggleOpen = id => { S.admin.open = S.admin.open===id ? null : id; render(); };
 
 window.setNotify = (key, val) => {
@@ -8082,9 +8083,9 @@ async function loadAdminTrainerName(){
   try{ S.admin.trainerName = (await DB.myTrainer()) || ''; }catch(e){ console.error(e); }
 }
 const isTrainerAdmin = () => S.admin.role === 'operator' && !!S.admin.trainerName;
-const TRAINER_ADMIN_SECS = ['dash','trainers.cal','trainers.detail'];
+const TRAINER_ADMIN_SECS = ['dash','trainers.cal','trainers.detail','bookings'];   // v241: 전체 예약 추가
 function platformNavFor(){
-  return isTrainerAdmin() ? NAV.platform.filter(i => ['dash','trainers'].includes(i.id)) : NAV.platform;
+  return isTrainerAdmin() ? NAV.platform.filter(i => ['dash','trainers','bookings'].includes(i.id)) : NAV.platform;   // v241
 }
 
 /* 메뉴 이동 */
@@ -14075,7 +14076,7 @@ window.seedDemoKIC = (force) => {
 };
 
 async function boot(){
-  console.info("[refit] booking v240");
+  console.info("[refit] booking v241");
   // 폴드·플립을 펼치거나 접을 때, 회전할 때: 폭이 바뀌면 화면을 다시 그립니다 (절대 좌표로 놓인 말풍선·차트가 어긋나지 않게)
   { let lastW = window.innerWidth, t = null;
     window.addEventListener('resize', () => { if(Math.abs(window.innerWidth - lastW) < 40) return;
