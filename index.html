@@ -2087,6 +2087,13 @@ const DB = {
                if(/admin_create_booking/.test(error.message||'')) return 'no_rpc'; throw error; }
     return 'ok';
   },
+  /* v239: 취소된 예약 내역 삭제 (서버 함수 admin_delete_canceled_bookings — 36번 SQL) */
+  async deleteCanceledBookings(ids){
+    if(!LIVE){ const rows = local.all(); const keep = rows.filter(b => !(ids.includes(b.id) && b.status === 'canceled')); local.save(keep); return rows.length - keep.length; }
+    const {data, error} = await sb.rpc('admin_delete_canceled_bookings', {p_ids: ids});
+    if(error){ if(/admin_delete_canceled_bookings|PGRST202|42883/.test((error.message||'') + (error.code||''))) throw new Error('서버에 삭제 함수가 없습니다. 36번 SQL을 먼저 실행해 주세요.'); throw error; }
+    return Number(data) || 0;
+  },
   async setStatus(id, status){
     if(!LIVE){
       const rows = local.all(); const b = rows.find(x=>x.id===id);
@@ -5792,7 +5799,7 @@ const AD = {email:'', pw:'', pw2:'', invite:'', regCompany:'', mode:'login',
             role:'operator',        // 'operator' 플랫폼 관리자 · 'company' 기업 관리자
             msg:'', filter:'all', companyFilter:'all', demoCompany:'kic',
             demoTrainer:'', regTrainer:'',
-            dateFilter:'', programFilter:'all', trainerFilter:'all', resched:null, add:null,
+            dateFilter:'', programFilter:'all', trainerFilter:'all', resched:null, add:null, sel:new Set(), bulkBusy:false,   // v239 sel
             analysisBy:'dept', analysisMetric:'count',
             intakeProgram:'all', intakeQuery:'', intakeOpen:null,
             bookingQuery:''};
@@ -6421,9 +6428,9 @@ function listTab(){
 
   return `
     <div class="toolbar">
-      ${[['all','전체'],['booked','신청됨'],['done','이용완료'],['survey','피드백 받음'],['none','미신청']].map(([k,l])=>
+      ${[['all','전체'],['booked','신청됨'],['done','이용완료'],['canceled','취소'],['survey','피드백 받음'],['none','미신청']].map(([k,l])=>
         `<button class="mini" style="${AD.filter===k?'border-color:var(--accent);background:var(--accent-soft);color:var(--accent-dark);font-weight:600':''}"
-          onclick="AD.filter='${k}';render()">${l}</button>`).join('')}
+          onclick="AD.filter='${k}';AD.sel.clear();render()">${l}</button>`).join('')}
       <div style="flex:1"></div>
       <button class="mini" style="border-color:var(--accent);color:var(--accent-dark);font-weight:600" onclick="adminAddOpen()">${ico('add','')} 예약 추가 (한국투자공사 명의)</button>
       <button class="mini" onclick="exportCSV()">CSV 내보내기</button>
@@ -6467,14 +6474,17 @@ function listTab(){
       ? `<div class="empty" style="margin-top:12px">"${esc(AD.bookingQuery)}" 에 해당하는 예약이 없습니다.</div>`
       : ''}
 
+    ${bulkBarHTML(rows)}
     <table>
       <thead><tr>
+        <th style="width:28px"><input type="checkbox" title="보이는 예약 전체 선택" ${rows.length && rows.every(r => AD.sel.has(r.id)) ? 'checked' : ''} onchange="toggleAllBookings(this.checked)"></th>
         <th style="width:96px">코드</th><th style="width:120px">프로그램</th><th style="width:150px">일시</th><th>회원</th>
         <th style="width:96px">상태</th><th style="width:80px">만족도</th><th style="width:200px"></th>
       </tr></thead>
       <tbody>
       ${rows.length ? rows.map(r=>`
         <tr>
+          <td><input type="checkbox" ${AD.sel.has(r.id) ? 'checked' : ''} onchange="toggleBookingSel('${esc(r.id)}', this.checked)"></td>
           <td style="font-family:ui-monospace,monospace">${esc(r.code)}</td>
           <td style="font-size:13px">${esc(programById(r.program)?.name||r.program||'–')}</td>
           <td>${fmtDate(r.slot_date)}<br><span style="color:var(--muted)">${fmtTime(String(r.slot_time).slice(0,5))}</span></td>
@@ -6494,9 +6504,9 @@ function listTab(){
             </div>
           </td>
         </tr>
-        ${AD.resched && AD.resched.id===r.id ? `<tr class="detailrow"><td colspan="7">${adminReschedPanel(r)}</td></tr>` : ''}
-        ${S.admin.open===r.id ? `<tr class="detailrow"><td colspan="7">${detailBlock(r)}</td></tr>` : ''}`).join('')
-        : `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:36px">해당하는 예약이 없습니다.</td></tr>`}
+        ${AD.resched && AD.resched.id===r.id ? `<tr class="detailrow"><td colspan="8">${adminReschedPanel(r)}</td></tr>` : ''}
+        ${S.admin.open===r.id ? `<tr class="detailrow"><td colspan="8">${detailBlock(r)}</td></tr>` : ''}`).join('')
+        : `<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:36px">해당하는 예약이 없습니다.</td></tr>`}
       </tbody>
     </table>`;
 }
@@ -7831,6 +7841,59 @@ window.sendSurvey = (id) => {
   );
   window.location.href = `mailto:${r.email}?subject=${subject}&body=${bodyText}`;
 };
+/* v239: 전체 예약 — 행 선택과 선택 작업 (이용완료 · 취소 · 취소 내역 삭제) */
+function bulkBarHTML(rows){
+  const sel = rows.filter(r => AD.sel.has(r.id));
+  if(!sel.length) return '';
+  const nBooked = sel.filter(r => r.status === 'booked').length;
+  const nLive   = sel.filter(r => r.status !== 'canceled').length;
+  const nCanc   = sel.filter(r => r.status === 'canceled').length;
+  const dis = AD.bulkBusy ? 'disabled' : '';
+  return `<div class="barline bulkbar">
+    <b>선택 ${sel.length}건</b>
+    ${nBooked ? `<button class="mini" ${dis} onclick="bulkMark('done')">이용완료 (${nBooked})</button>` : ''}
+    ${nLive   ? `<button class="mini" ${dis} onclick="bulkMark('canceled')">취소 (${nLive})</button>` : ''}
+    ${nCanc   ? `<button class="mini danger" ${dis} onclick="bulkDeleteCanceled()">취소 내역 삭제 (${nCanc})</button>` : ''}
+    <button class="mini" ${dis} onclick="AD.sel.clear();render()">선택 해제</button>
+    <span class="sub" style="margin-left:auto">${nCanc && nLive ? '삭제는 취소된 건에만, 이용완료·취소는 취소되지 않은 건에만 적용됩니다.' : nCanc ? '취소된 내역을 지우면 목록·집계에서 완전히 사라집니다.' : ''}</span>
+  </div>`;
+}
+function visibleBookingRows(){
+  let rows = adminRows().filter(r => AD.filter==='all' ? true : AD.filter==='survey' ? !!r.survey : r.status===AD.filter);
+  const q = (AD.bookingQuery || '').trim().toLowerCase();
+  if(q) rows = rows.filter(r => [programById(r.program)?.name || '', r.program || '', r.name || '', r.code || '', r.email || '', r.dept || ''].join(' ').toLowerCase().includes(q));
+  if(AD.programFilter !== 'all') rows = rows.filter(r => (r.program||'') === AD.programFilter);
+  if(AD.trainerFilter !== 'all') rows = rows.filter(r => trKey(programById(r.program), r) === AD.trainerFilter);
+  if(AD.dateFilter) rows = rows.filter(r => (r.slot_date||'') === AD.dateFilter);
+  return rows;
+}
+window.toggleBookingSel = (id, on) => { if(on) AD.sel.add(id); else AD.sel.delete(id); render(); };
+window.toggleAllBookings = (on) => { visibleBookingRows().forEach(r => on ? AD.sel.add(r.id) : AD.sel.delete(r.id)); render(); };
+window.bulkMark = async (status) => {
+  const rows = adminRows().filter(r => AD.sel.has(r.id) && (status === 'done' ? r.status === 'booked' : r.status !== 'canceled'));
+  if(!rows.length) return;
+  const msg = status === 'done' ? `선택한 ${rows.length}건을 이용완료로 표시할까요?`
+            : `선택한 ${rows.length}건을 취소할까요? 해당 시간대가 다시 열리고, 임직원 명의 예약은 취소 안내 문자·메일이 나갑니다.`;
+  if(!confirm(msg)) return;
+  AD.bulkBusy = true; render();
+  let ok = 0, fail = 0;
+  for(const r of rows){ try{ await DB.setStatus(r.id, status); ok++; }catch(e){ console.error(e); fail++; } }
+  AD.sel.clear(); AD.bulkBusy = false;
+  toast(`${ok}건 ${status === 'done' ? '이용완료 표시' : '취소'}${fail ? ` · ${fail}건 실패` : ''}`);
+  await refreshAdmin();
+};
+window.bulkDeleteCanceled = async () => {
+  const rows = adminRows().filter(r => AD.sel.has(r.id) && r.status === 'canceled');
+  if(!rows.length) return;
+  if(!confirm(`취소된 예약 ${rows.length}건의 내역을 삭제할까요?\n목록과 집계에서 완전히 사라지며 되돌릴 수 없습니다. (신청·이용완료 상태는 지워지지 않습니다)`)) return;
+  AD.bulkBusy = true; render();
+  try{
+    const n = await DB.deleteCanceledBookings(rows.map(r => r.id));
+    toast(`취소 내역 ${n}건을 삭제했습니다.`);
+  }catch(e){ console.error(e); toast(authErrKo(e, '삭제하지 못했습니다.')); }
+  AD.sel.clear(); AD.bulkBusy = false;
+  await refreshAdmin();
+};
 window.mark = async (id, status) => {
   if(status==='canceled' && !confirm('이 신청을 취소할까요? 해당 시간대가 다시 열립니다.')) return;
   await DB.setStatus(id, status);
@@ -7855,6 +7918,7 @@ async function refreshAdmin(){
       catch(e){ console.error(e); S.admin.rows = []; }
     }else if(S.admin.role === 'operator'){
       S.admin.rows = await DB.adminList();
+      if(AD.sel.size){ const ids = new Set(S.admin.rows.map(r => r.id)); [...AD.sel].forEach(id => { if(!ids.has(id)) AD.sel.delete(id); }); }   // v239
       if(S.nav.pf === 'system.accounts' && LIVE) await loadAccountsLive();   // v178
     }
   }catch(e){ console.error(e); toast('데이터를 불러오지 못했습니다.'); }
@@ -8162,20 +8226,44 @@ function adminShell(roleKey, roleLabel, scopeName, items, cur, title, sub, body,
 }
 
 /* ---------- 플랫폼 관리자 · 체형 분석 결과 ---------- */
-const PM = { q:'' };
+const PM = { q:'', date:'', limit:30 };   // v239: date = 예약일 필터, limit = 표시 인원(더보기)
 function pfMotiPane(){
   return `
     ${privacyBox('<b>측정 결과지는 담당 운동처방사·상담사만 봅니다.</b> 회사 관리자 화면에는 개인 결과가 나가지 않으며, 승인한 결과만 해당 임직원 본인에게 보입니다.')}
 
     <div class="card">
       <div class="card-h">임직원 결과 등록 <span class="card-sub">${(AD.companyFilter||'all') === 'all' ? '모든 회사' : esc(companyName(AD.companyFilter))} · 이름·이메일로 찾기</span></div>
-      <input type="text" class="pm-search" placeholder="이름 또는 이메일" value="${esc(PM.q)}" oninput="PM.q=this.value;pfMotiRefresh()">
+      <div class="pm-tools">
+        <input type="text" class="pm-search" placeholder="이름 또는 이메일" value="${esc(PM.q)}" oninput="PM.q=this.value;PM.limit=30;pfMotiRefresh()">
+        <label class="pm-date">${pmDateInnerHTML()}</label>
+      </div>
       <div id="pmList">${pfMotiListHTML()}</div>
     </div>
     ${pfMotiVideosHTML()}`;
 }
 /* 목록만 다시 그립니다 (검색창은 그대로 두어 커서가 유지됨) */
-window.pfMotiRefresh = () => { const el = document.getElementById('pmList'); if(el) el.innerHTML = pfMotiListHTML(); };
+function pmDateInnerHTML(){
+  return `<span>예약일</span>
+    <input type="date" value="${esc(PM.date)}" onchange="PM.date=this.value;PM.limit=30;pfMotiRefresh()">
+    ${PM.date ? `<button type="button" class="mini" onclick="PM.date='';PM.limit=30;pfMotiRefresh()">날짜 해제</button>` : ''}`;
+}
+window.pfMotiRefresh = () => {
+  const el = document.getElementById('pmList'); if(el) el.innerHTML = pfMotiListHTML();      // 목록만 다시 그림 (검색창 커서 유지)
+  const d = document.querySelector('.pm-tools .pm-date'); if(d) d.innerHTML = pmDateInnerHTML();   // 날짜 해제 버튼 표시/숨김
+};
+window.pfMotiMore = () => { PM.limit += 30; const el = document.getElementById('pmList'); if(el) el.innerHTML = pfMotiListHTML(); };
+/* v239: 특정 예약일에 프로그램이 잡힌 임직원 (취소 제외) — 예약 표에서 뽑고 회원 정보로 보강, 시작 시각순 */
+function motiPeopleOnDate(date){
+  const src = LIVE ? (S.admin.rows || []) : local.all();
+  const known = new Map((LIVE ? motiPeopleListLive() : motiPeopleList()).map(p => [String(p.email).toLowerCase(), p]));
+  const out = new Map();
+  src.filter(b => b.slot_date === date && b.status !== 'canceled' && b.email && b.email !== MASTER_BOOKING.email)
+     .sort((a, b) => String(a.slot_time).localeCompare(String(b.slot_time)))
+     .forEach(b => { const k = String(b.email).toLowerCase(); if(out.has(k)) return;
+        const p = known.get(k) || {};
+        out.set(k, {email:b.email, name:p.name || b.name, company:p.company || b.company, slot_time:String(b.slot_time).slice(0,5), trainer: trKey(programById(b.program), b) || ''}); });
+  return [...out.values()];
+}
 /* 임직원 후보: 회원 + 예약자 (이메일 기준, 회사 정보 포함) */
 function motiPeopleList(){
   const people = new Map();
@@ -8188,23 +8276,27 @@ function pfMotiListHTML(){
   const all = motiAll();
   const q = PM.q.trim().toLowerCase();
   const co = AD.companyFilter || 'all';
-  const list = (LIVE ? motiPeopleListLive() : motiPeopleList())
+  const byDate = !!PM.date;
+  let list = (byDate ? motiPeopleOnDate(PM.date) : (LIVE ? motiPeopleListLive() : motiPeopleList()))
     .filter(p => co === 'all' || (p.company || '') === co)
-    .filter(p => !q || (p.name || '').toLowerCase().includes(q) || (p.email || '').toLowerCase().includes(q))
-    .sort((a, b) => (all[b.email?.toLowerCase()] ? 1 : 0) - (all[a.email?.toLowerCase()] ? 1 : 0) || String(a.name).localeCompare(String(b.name)));
+    .filter(p => !q || (p.name || '').toLowerCase().includes(q) || (p.email || '').toLowerCase().includes(q));
+  if(!byDate) list = list.sort((a, b) => (all[b.email?.toLowerCase()] ? 1 : 0) - (all[a.email?.toLowerCase()] ? 1 : 0) || String(a.name).localeCompare(String(b.name)));
   const stBadge = r => !r ? '<span class="moti-badge none">미등록</span>'
     : r.status === 'approved' ? '<span class="moti-badge ok">승인·전달됨</span>'
     : '<span class="moti-badge draft">임시 저장 · 미승인</span>';
-  if(!list.length) return `<p class="sub">${q ? `'${esc(PM.q)}'에 맞는 임직원이 없습니다.` : (co !== 'all' ? `${esc(companyName(co))} 소속 임직원이 없습니다.` : '가입한 임직원이 없습니다.')}</p>`;
-  return `<div class="pm-list">${list.slice(0, 30).map(p => { const r = all[String(p.email).toLowerCase()];
+  if(!list.length) return `<p class="sub">${byDate ? `${fmtDate(PM.date)}에 ${q ? `'${esc(PM.q)}'에 맞는 ` : ''}예약된 임직원이 없습니다.` : q ? `'${esc(PM.q)}'에 맞는 임직원이 없습니다.` : (co !== 'all' ? `${esc(companyName(co))} 소속 임직원이 없습니다.` : '가입한 임직원이 없습니다.')}</p>`;
+  const shown = list.slice(0, PM.limit);
+  return `${byDate ? `<p class="sub pm-datehead">${fmtDate(PM.date)} 예약 ${list.length}명 · 시작 시각순</p>` : ''}<div class="pm-list">${shown.map(p => { const r = all[String(p.email).toLowerCase()];
         return `<div class="pm-row">
-          <div class="pm-who"><b>${esc(p.name || '(이름 없음)')}</b><span>${esc(p.email)} · ${esc(companyName(p.company))}</span></div>
+          <div class="pm-who"><b>${esc(p.name || '(이름 없음)')}</b><span>${esc(p.email)} · ${esc(companyName(p.company))}${byDate ? ` · <strong class="pm-time">${esc(fmtTime(p.slot_time))}</strong>${p.trainer ? ` · ${esc(p.trainer)} 운동처방사` : ''}` : ''}</span></div>
           <div class="pm-st">${stBadge(r)}${r ? `<small>${esc(r.measured || '')} · 등급 ${esc(r.grade || '–')}</small>` : ''}</div>
           <div class="pm-act">
             <button type="button" class="btn small" onclick="openMotiEditor({email:'${esc(p.email)}',name:'${esc(p.name||'')}'})">${r ? '열기·수정' : '결과지 등록'}</button>
             ${r && r.status !== 'approved' ? `<button type="button" class="mini" onclick="motiApprove('${esc(p.email)}')">승인</button>` : ''}
             ${r ? `<button type="button" class="mini danger" onclick="if(confirm('결과를 삭제할까요?')){motiRemove('${esc(p.email)}');render();}">삭제</button>` : ''}
-          </div></div>`; }).join('')}</div>${list.length > 30 ? `<p class="sub" style="margin-top:8px">${list.length}명 중 30명만 표시 — 검색으로 좁혀 주세요.</p>` : ''}`;
+          </div></div>`; }).join('')}</div>${list.length > shown.length
+        ? `<button type="button" class="pm-more" onclick="pfMotiMore()">${ico('expand_more','')} 인원 더보기 <span>(${shown.length} / ${list.length}명 · 30명씩)</span></button>`
+        : (list.length > 30 ? `<p class="sub" style="margin-top:8px;text-align:center">${list.length}명 모두 표시했습니다.</p>` : '')}`;
 }
 function pfMotiVideosHTML(){
   const ovr = videoLinks();
@@ -8652,6 +8744,7 @@ function trTimeGrid(cols, colorOf, minCol, showNowLine, fullDay){
 /* 날짜별 열 (주 보기) */
 function trDateCols(evs, days, colorOf){
   const todayIso = iso(new Date());
+  const rank = trRankOf();   // v240
   return days.map(d => {
     const ds = iso(d), on = ds === todayIso;
     const dayEvs = evs.filter(e => e.date === ds);
@@ -8659,7 +8752,7 @@ function trDateCols(evs, days, colorOf){
     // 그 날 들어오는 운동처방사를 요일 아래에 함께 적습니다.
     const cnt = new Map();
     dayEvs.forEach(e => cnt.set(e.key, (cnt.get(e.key) || 0) + 1));
-    const who = [...cnt.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const who = [...cnt.entries()].sort((a,b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));   // v240: 고정 순서
 
     return {
       today: on,
@@ -8703,7 +8796,15 @@ function trPersonCols(evs, list, colorOf, isToday){
 }
 
 /* 월간 보기 */
+/* v240: 달력(월 칸·주 머리글·왼쪽 운동처방사별 예약)에서 운동처방사 표시 순서를 장혜윤 → 강태이 → 김정환 으로 고정.
+   그 밖의 이름은 담당 배정 순서, 그다음 가나다순 */
+const TR_ORDER_FIXED = ['장혜윤', '강태이', '김정환'];
+function trRankOf(){
+  const names = [...TR_ORDER_FIXED, ...ALL_HOSTS().filter(n => !TR_ORDER_FIXED.includes(n))];
+  return name => { const i = names.indexOf(name); return i < 0 ? 999 : i; };
+}
 function trMonthGrid(evs, colorOf){
+  const rank = trRankOf();
   const c = S.nav.trCursor;
   const y = c.getFullYear(), m = c.getMonth();
   const start = new Date(y, m, 1).getDay();
@@ -8726,8 +8827,7 @@ function trMonthGrid(evs, colorOf){
       if(!byWho.has(e.key)) byWho.set(e.key, []);
       byWho.get(e.key).push(e);
     });
-    const who = [...byWho.entries()].sort((a,b) => b[1].length - a[1].length
-                                              || a[1][0].s - b[1][0].s);
+    const who = [...byWho.entries()].sort((a,b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]));   // v240: 고정 순서
 
     cells.push(`<div class="mcal-c ${ds===todayIso?'today':''}"
         onclick="trPickDay('${ds}')" style="cursor:pointer">
@@ -8763,7 +8863,7 @@ function trMonthGrid(evs, colorOf){
 
 function trainerPane(scopeRows){
   const all  = scopeRows || [];
-  const list = trainersFrom(all);
+  const list = trainersFrom(all).slice().sort((a,b) => trRankOf()(a.name) - trRankOf()(b.name) || a.name.localeCompare(b.name));   // v240: 고정 순서
   const colorOf = {};
   // 직접 정한 색이 있으면 그 색을 씁니다.
   list.forEach((t,i) => colorOf[t.name] =
@@ -9880,6 +9980,16 @@ function donutChart(items, opt = {}) {
   .me-ex{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
   .me-ex span{font-size:12px;background:#fff;border:1px solid #DDE1E8;border-radius:999px;padding:4px 10px;color:#3A4667}
   .pm-search{width:100%;border:1px solid #DDE1E8;border-radius:9px;padding:10px 12px;font-size:14px;margin-bottom:10px}
+  .pm-tools{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap}
+  .pm-tools .pm-search{flex:1;min-width:220px;margin-bottom:10px}
+  .pm-date{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:10px}
+  .pm-date input{border:1px solid #DDE1E8;border-radius:9px;padding:9px 10px;font-size:14px;font-family:inherit;color:var(--text)}
+  .pm-datehead{margin:0 0 8px}
+  .pm-time{color:var(--accent-dark);font-weight:700;font-size:12.5px}
+  .pm-more{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:10px;padding:11px;border:1px dashed #C7CEDA;border-radius:10px;background:#F7F8FB;color:var(--accent-dark);font-weight:600;font-size:14px;cursor:pointer;font-family:inherit}
+  .pm-more:hover{background:#EEF1F7}
+  .pm-more span{color:var(--muted);font-weight:400;font-size:12.5px}
+  .bulkbar{margin:8px 0;align-items:center;flex-wrap:wrap;gap:8px}
   .pm-list{display:flex;flex-direction:column;gap:6px}
   .pm-row{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid #E6E9EF;border-radius:10px}
   .pm-who b{display:block;font-size:13.5px;color:#14161A}.pm-who span{font-size:12px;color:#8A909C}
@@ -13965,7 +14075,7 @@ window.seedDemoKIC = (force) => {
 };
 
 async function boot(){
-  console.info("[refit] booking v238");
+  console.info("[refit] booking v240");
   // 폴드·플립을 펼치거나 접을 때, 회전할 때: 폭이 바뀌면 화면을 다시 그립니다 (절대 좌표로 놓인 말풍선·차트가 어긋나지 않게)
   { let lastW = window.innerWidth, t = null;
     window.addEventListener('resize', () => { if(Math.abs(window.innerWidth - lastW) < 40) return;
