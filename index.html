@@ -2147,6 +2147,29 @@ const DB = {
                if(/admin_create_booking/.test(error.message||'')) return 'no_rpc'; throw error; }
     return 'ok';
   },
+  /* v250: 플랫폼 관리자가 임직원 본인 명의로 예약 (41번 SQL admin_create_booking_for) — 알림·나의 예약·사전 상담이 본인 기준으로 붙음 */
+  async adminAddBookingFor(row){
+    if(!LIVE){
+      const rows = local.all();
+      if(rows.some(b=>b.program===row.program && b.slot_date===row.slot_date && b.slot_time===row.slot_time && b.status!=='canceled')) return 'taken';
+      if(rows.some(b=>String(b.email).toLowerCase()===String(row.email).toLowerCase() && b.status!=='canceled')) return 'quota';
+      const m = (DB.memberList()||[]).find(x => String(x.email).toLowerCase() === String(row.email).toLowerCase()) || {};
+      rows.push({...row, id:row.code, name:m.name || row.name, phone:m.phone || null, dept:m.dept || row.dept || '', status:'booked', survey:null,
+                 intake:{...(m.baseline||{})}, memo:['관리자 대리 신청(' + (KSTORE.getItem('demoTrainer') || '운영자') + ')', row.memo].filter(Boolean).join(' · '), created_at:new Date().toISOString()});
+      local.save(rows); return 'ok';
+    }
+    const {error} = await sb.rpc('admin_create_booking_for', {
+      p_email:row.email, p_program:row.program, p_date:row.slot_date, p_time:row.slot_time, p_code:row.code,
+      p_trainer:row.trainer || null, p_memo:row.memo || null });
+    if(error){
+      const m = (error.message||'') + ' ' + (error.code||'');
+      if(String(error.code) === '23505' || /duplicate|unique/i.test(m)) return 'taken';
+      if(/quota_exceeded/.test(m)) return 'quota';
+      if(/employee_not_found/.test(m)) return 'no_emp';
+      if(/admin_create_booking_for|PGRST202|42883/.test(m)) return 'no_rpc';
+      throw error; }
+    return 'ok';
+  },
   /* v239: 취소된 예약 내역 삭제 (서버 함수 admin_delete_canceled_bookings — 36번 SQL) */
   async deleteCanceledBookings(ids){
     if(!LIVE){ const rows = local.all(); const keep = rows.filter(b => !(ids.includes(b.id) && b.status === 'canceled')); local.save(keep); return rows.length - keep.length; }
@@ -6425,12 +6448,13 @@ function noBookingTab(){
       </div>
       <span class="filter-count">${people.length}명 미신청 <span style="color:var(--muted);font-weight:400">/ 발급 ${total}명</span></span>
     </div>
+    ${AD.add ? adminAddPanel() : ''}
     <p class="card-sub" style="margin:8px 0 4px">계정은 발급됐지만 아직 프로그램을 신청하지 않은(또는 취소만 한) 임직원입니다.</p>
     ${ACC.loading && !people.length ? `<div class="empty" style="margin-top:12px">계정 목록을 불러오는 중…</div>` : `
     <table>
       <thead><tr>
         <th style="width:110px">사번</th><th style="width:120px">이름</th><th>아이디</th><th style="width:160px">부서</th>
-        <th style="width:150px">계정 상태</th><th style="width:110px">취소 이력</th>
+        <th style="width:150px">계정 상태</th><th style="width:110px">취소 이력</th><th style="width:130px"></th>
       </tr></thead>
       <tbody>
       ${people.length ? people.map(m => `
@@ -6441,8 +6465,9 @@ function noBookingTab(){
           <td>${esc(m.dept || (m.baseline && m.baseline.dept) || '—')}</td>
           <td style="font-size:12.5px">${m.mustChangePw ? '<span style="color:#A3431F">첫 로그인 전</span>' : (m.baselineAt ? '로그인함 · 사전 상담 완료' : '로그인함 · 사전 상담 전')}</td>
           <td>${m.canceledN ? `취소 ${m.canceledN}건` : '<span style="color:var(--muted)">–</span>'}</td>
+          <td><button class="mini" style="border-color:var(--accent);color:var(--accent-dark);font-weight:600;white-space:nowrap" onclick="adminAddOpenFor('${esc(m.email)}')">${ico('event_available','')} 예약 잡아 주기</button></td>
         </tr>`).join('')
-      : `<tr><td colspan="6" class="empty">${q ? `"${esc(AD.bookingQuery)}" 에 해당하는 미신청 임직원이 없습니다.` : '발급된 모든 임직원이 신청을 마쳤습니다.'}</td></tr>`}
+      : `<tr><td colspan="7" class="empty">${q ? `"${esc(AD.bookingQuery)}" 에 해당하는 미신청 임직원이 없습니다.` : '발급된 모든 임직원이 신청을 마쳤습니다.'}</td></tr>`}
       </tbody>
     </table>`}`;
 }
@@ -6634,11 +6659,66 @@ function adminReschedPanel(r){
       <span class="card-sub">관리자 변경은 30분 전 마감과 관계없이 저장됩니다.</span>
     </div></div>`;
 }
-window.adminAddOpen = () => { const p = PROGRAMS[0]; AD.add = {program:p.id, name:MASTER_BOOKING.name, dept:'', memo:'', date:p.openFrom || iso(new Date()), base:p.slots[0], time:null, trainer:'', allowForce:false /* 대체는 행의 'KIC 명의로 대체' 버튼으로만 */}; AD.resched = null; adminLoadTaken(AD.add.date); };
+/* v250: 미신청 탭에서 '예약 잡아 주기' — 그 임직원을 고른 채로 패널 열기 */
+window.adminAddOpenFor = (email) => {
+  adminAddOpen();
+  const m = (DB.memberList()||[]).find(x => String(x.email).toLowerCase() === String(email).toLowerCase());
+  if(AD.add){ AD.add.who = 'employee'; AD.add.emp = m ? {email:m.email, name:m.name||'', empno:m.empno||'', dept:m.dept||''} : {email, name:'', empno:'', dept:''}; AD.add.empQ = ''; }
+  AD.filter = 'all'; render();
+  setTimeout(() => { const el = document.querySelector('.card[data-addpanel]'); if(el) el.scrollIntoView({behavior:'smooth', block:'start'}); }, 60);
+};
+window.adminAddWho = (who) => { if(!AD.add) return; AD.add.who = who; if(who === 'master'){ AD.add.emp = null; } render(); };
+window.adminAddPickEmp = (email) => {
+  const m = (DB.memberList()||[]).find(x => String(x.email).toLowerCase() === String(email).toLowerCase()); if(!m || !AD.add) return;
+  AD.add.emp = {email:m.email, name:m.name||'', empno:m.empno||'', dept:m.dept||''}; AD.add.empQ = ''; render();
+};
+function adminAddEmpPickerHTML(st){
+  if(LIVE && ACC.membersCache === undefined && !ACC.loading){ ACC.loading = true; setTimeout(() => loadAccountsLive(), 0); }
+  if(st.emp){
+    const live = adminRows().filter(b => String(b.email).toLowerCase() === String(st.emp.email).toLowerCase() && b.status !== 'canceled');
+    return `<div class="addemp-sel">
+      <span>${ico('person','')}<b>${esc(st.emp.name || '(이름 없음)')}</b> · ${esc(st.emp.empno || displayId(st.emp.email))}${st.emp.dept ? ' · ' + esc(st.emp.dept) : ''}
+        <small>${esc(st.emp.email)}</small></span>
+      ${live.length ? `<span class="addemp-warn">${ico('warning','')} 이미 신청 중인 예약 ${live.length}건 (연 1회 제한으로 추가되지 않습니다)</span>` : ''}
+      <button type="button" class="mini" onclick="AD.add.emp=null;render()">다시 고르기</button>
+    </div>`;
+  }
+  const q = String(st.empQ || '').trim().toLowerCase();
+  const all = (DB.memberList() || []).filter(m => m.email && m.email !== MASTER_BOOKING.email);
+  const hits = q ? all.filter(m => [m.name, m.empno, displayId(m.email), m.dept].some(v => String(v||'').toLowerCase().includes(q))).slice(0, 8) : [];
+  return `<div class="addemp">
+    <input type="search" class="filter-sel livesearch" id="addEmpSearch" data-sel="#addEmpSearch" autocomplete="off" placeholder="사번 · 이름 · 아이디로 찾기"
+           value="${esc(st.empQ || '')}" oninput="AD.add.empQ=this.value;searchRender(this)">
+    ${q ? (hits.length ? `<div class="addemp-list">${hits.map(m => `<button type="button" class="addemp-row" onclick="adminAddPickEmp('${esc(m.email)}')">
+          <b>${esc(m.name || '(이름 없음)')}</b><span>${esc(m.empno || displayId(m.email))}${m.dept ? ' · ' + esc(m.dept) : ''}</span>
+          <small>${m.mustChangePw ? '첫 로그인 전' : (m.baselineAt ? '사전 상담 완료' : '사전 상담 전')}</small></button>`).join('')}</div>`
+        : `<div class="sub" style="margin-top:6px">'${esc(st.empQ)}'에 맞는 임직원이 없습니다.</div>`)
+      : `<div class="sub" style="margin-top:6px">${ACC.loading ? '계정 목록을 불러오는 중…' : `발급 계정 ${all.length}명 중에서 찾습니다.`}</div>`}
+  </div>`;
+}
+window.adminAddOpen = () => { const p = PROGRAMS[0]; AD.add = {who:'master', emp:null, empQ:'', program:p.id, name:MASTER_BOOKING.name, dept:'', memo:'', date:p.openFrom || iso(new Date()), base:p.slots[0], time:null, trainer:'', allowForce:false /* 대체는 행의 'KIC 명의로 대체' 버튼으로만 */}; AD.resched = null; adminLoadTaken(AD.add.date); };
 window.adminAddClose = () => { AD.add = null; render(); };
 window.adminAddSave = async () => {
   const st = AD.add; const p = programById(st.program);
   if(!st.date || !st.time){ toast('날짜와 자리를 골라 주세요.'); return; }
+  if(st.who === 'employee'){   // v250: 임직원 본인 명의
+    if(!st.emp){ toast('임직원을 먼저 골라 주세요.'); return; }
+    const occupant = adminRows().find(b => b.program === p.id && b.slot_date === st.date && String(b.slot_time).slice(0,5) === st.time && b.status === 'booked');
+    if(occupant){ toast(`그 자리에는 이미 ${occupant.name} 님의 예약이 있습니다. 빈 자리를 골라 주세요.`); return; }
+    if(!confirm(`${st.emp.name || st.emp.email} 님 본인 명의로 ${fmtDate(st.date)} ${st.time} 자리를 예약할까요?\n확정 문자·메일이 본인에게 바로 나갑니다.`)) return;
+    const row = { code:newCode(), program:p.id, email:st.emp.email, name:st.emp.name, dept:st.emp.dept || '', memo:(st.memo||'').trim(),
+                  slot_date:st.date, slot_time:st.time, trainer:st.trainer || null, company:'kic' };
+    try{
+      const res = await DB.adminAddBookingFor(row);
+      if(res === 'taken'){ toast('그 자리는 이미 예약되어 있습니다.'); return adminLoadTaken(st.date); }
+      if(res === 'quota'){ toast(`${st.emp.name || ''} 님은 이미 신청 중인 예약이 있어(연 1회) 추가할 수 없습니다.`); return; }
+      if(res === 'no_emp'){ toast('발급된 계정이 아닙니다. 계정 발급 뒤 다시 시도해 주세요.'); return; }
+      if(res === 'no_rpc'){ toast('서버에 admin_create_booking_for 함수가 없습니다. 41번 SQL을 먼저 실행해 주세요.'); return; }
+      AD.add = null; toast(`${row.name || row.email} 님 명의로 ${fmtDate(row.slot_date)} ${row.slot_time} 자리를 예약했습니다. 확정 알림이 발송됩니다.`);
+      await refreshAdmin(); if(LIVE) await loadAccountsLive(); render();
+    }catch(e){ console.error(e); toast(authErrKo(e, '추가하지 못했습니다.')); }
+    return;
+  }
   const row = { code:newCode(), program:p.id, company:MASTER_BOOKING.company, email:MASTER_BOOKING.email,
                 name:(st.name||'').trim() || MASTER_BOOKING.name, dept:(st.dept||'').trim(), memo:(st.memo||'').trim(),
                 slot_date:st.date, slot_time:st.time, trainer:st.trainer || null, phone:null };
@@ -6674,11 +6754,19 @@ window.adminReplaceWithMaster = async (id) => {
 };
 function adminAddPanel(){
   const st = AD.add; const p = programById(st.program);
-  return `<div class="card" style="margin:10px 0;border-color:var(--accent)">
-    <div class="card-h">${ico('add_circle','')} 예약 추가 <span class="card-sub">한국투자공사(기관) 명의로 자리를 잡습니다 — 연 1회 제한·사전 상담 없이 · 명의 아이디 ${esc(MASTER_BOOKING.email)}</span></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
-      <label class="filter-group"><span class="filter-label" style="white-space:nowrap">표시 이름</span><input type="text" class="filter-sel" value="${esc(st.name)}" oninput="AD.add.name=this.value" placeholder="한국투자공사"></label>
-      <label class="filter-group"><span class="filter-label" style="white-space:nowrap">부서(선택)</span><input type="text" class="filter-sel" value="${esc(st.dept)}" oninput="AD.add.dept=this.value"></label>
+  const emp = st.who === 'employee';
+  return `<div class="card" style="margin:10px 0;border-color:var(--accent)" data-addpanel="1">
+    <div class="card-h">${ico('add_circle','')} 예약 추가
+      <span class="card-sub">${emp ? '임직원 본인 명의 — 본인 아이디·휴대폰·알림 이메일로 저장되어 확정·하루 전·1시간 전·5분 전·만족도 알림이 본인에게 가고, 나의 예약에 보입니다 (연 1회 제한 적용)'
+                                 : `한국투자공사(기관) 명의로 자리를 잡습니다 — 연 1회 제한·사전 상담 없이 · 알림 없음 · 명의 아이디 ${esc(MASTER_BOOKING.email)}`}</span></div>
+    <div class="addwho">
+      <button type="button" class="mini ${emp?'':'on'}" onclick="adminAddWho('master')">${ico('apartment','')} 한국투자공사 명의</button>
+      <button type="button" class="mini ${emp?'on':''}" onclick="adminAddWho('employee')">${ico('person','')} 임직원 본인 명의</button>
+    </div>
+    ${emp ? adminAddEmpPickerHTML(st) : ''}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px${emp?';margin-top:10px':''}">
+      ${emp ? '' : `<label class="filter-group"><span class="filter-label" style="white-space:nowrap">표시 이름</span><input type="text" class="filter-sel" value="${esc(st.name)}" oninput="AD.add.name=this.value" placeholder="한국투자공사"></label>
+      <label class="filter-group"><span class="filter-label" style="white-space:nowrap">부서(선택)</span><input type="text" class="filter-sel" value="${esc(st.dept)}" oninput="AD.add.dept=this.value"></label>`}
       <label class="filter-group" style="flex:1;min-width:220px"><span class="filter-label" style="white-space:nowrap">메모(선택)</span><input type="text" class="filter-sel" style="width:100%" value="${esc(st.memo)}" oninput="AD.add.memo=this.value" placeholder="예: 임원 방문 · 외부 손님"></label>
     </div>
     ${adminPickHTML(st, p, null, 'AD.add')}
@@ -7477,6 +7565,8 @@ function bookErrorText(err){
 
   if(code === '23505')
     return '방금 그 시간은 이미 신청된 시간입니다. 다른 시간을 골라 주세요.';
+  if(/slot_too_soon/.test(msg)) return '이 타임은 신청 가능 시간이 지났습니다. 다른 타임을 골라 주세요.';   // v250
+  if(/quota_exceeded/.test(msg)) return '올해 신청 가능 횟수를 모두 사용했습니다.';
 
   // 브라우저 저장 공간이 가득 찬 경우 (데모 모드에서 자주 생깁니다)
   if(err && (err.name === 'QuotaExceededError' || code === 22 || code === 1014
@@ -10125,6 +10215,20 @@ function donutChart(items, opt = {}) {
   .pm-more:hover{background:#EEF1F7}
   .pm-more span{color:var(--muted);font-weight:400;font-size:12.5px}
   .bulkbar{margin:8px 0;align-items:center;flex-wrap:wrap;gap:8px}
+  /* v250: 예약 추가 — 명의 선택·임직원 찾기 */
+  .addwho{display:flex;gap:6px;margin-bottom:10px}
+  .addwho .mini.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-dark);font-weight:700}
+  .addemp{position:relative;max-width:520px}
+  .addemp .filter-sel{width:100%}
+  .addemp-list{border:1px solid var(--line);border-radius:10px;background:#fff;margin-top:6px;overflow:hidden;box-shadow:0 6px 18px rgba(20,22,26,.08)}
+  .addemp-row{display:grid;grid-template-columns:110px 1fr auto;gap:10px;align-items:center;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);background:#fff;padding:9px 12px;font:inherit;cursor:pointer}
+  .addemp-row:last-child{border-bottom:0}.addemp-row:hover{background:#F4F6FB}
+  .addemp-row b{font-size:13.5px}.addemp-row span{font-size:12.5px;color:var(--muted)}.addemp-row small{font-size:11.5px;color:#9a5b00}
+  .addemp-sel{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border:1px solid var(--accent);background:var(--accent-soft);border-radius:10px;padding:9px 12px;font-size:13.5px}
+  .addemp-sel .material-symbols-outlined{font-size:17px;vertical-align:-3px;margin-right:3px;color:var(--accent-dark)}
+  .addemp-sel small{display:block;color:var(--muted);font-size:12px}
+  .addemp-warn{color:#A3431F;font-size:12.5px;font-weight:600}
+  .addemp-warn .material-symbols-outlined{font-size:15px;color:#A3431F}
   .pm-list{display:flex;flex-direction:column;gap:6px}
   .pm-row{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid #E6E9EF;border-radius:10px}
   .pm-who b{display:block;font-size:13.5px;color:#14161A}.pm-who span{font-size:12px;color:#8A909C}
@@ -14210,7 +14314,7 @@ window.seedDemoKIC = (force) => {
 };
 
 async function boot(){
-  console.info("[refit] booking v249");
+  console.info("[refit] booking v250");
   // 폴드·플립을 펼치거나 접을 때, 회전할 때: 폭이 바뀌면 화면을 다시 그립니다 (절대 좌표로 놓인 말풍선·차트가 어긋나지 않게)
   { let lastW = window.innerWidth, t = null;
     window.addEventListener('resize', () => { if(Math.abs(window.innerWidth - lastW) < 40) return;
