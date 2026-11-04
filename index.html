@@ -273,6 +273,17 @@
   .pb-mark{font-size:12px;color:var(--accent);text-align:right;line-height:1}
   .pb-row.on.warn .pb-mark{color:#93000a}
   .pb-rest{font-size:10.5px;color:#b3b3ab;margin-top:6px;line-height:1.45}
+  /* v248: 운동처방사 코멘트 */
+  .tnote{background:#fffdf5;border-color:#efe3b8}
+  .tnote-priv{margin-left:auto;font-weight:500;color:#9a5b00;display:inline-flex;align-items:center;gap:3px;font-size:11px}
+  .tnote-priv .material-symbols-outlined{font-size:13px;color:#9a5b00}
+  .tnote-ta{width:100%;box-sizing:border-box;border:1px solid #e3d9b3;border-radius:8px;padding:9px 11px;font-size:13px;line-height:1.5;font-family:inherit;background:#fff;resize:vertical;min-height:72px}
+  .tnote-ta:focus{outline:2px solid var(--accent);outline-offset:-1px}
+  .tnote-foot{display:flex;align-items:center;gap:8px;margin-top:8px}
+  .nmark{font-style:normal;font-size:10px;margin-left:2px;opacity:.85;vertical-align:1px}
+  .mtr-nm[title],.trev-emps span[title]{text-decoration:underline dotted;text-underline-offset:2px}
+  .mtr-nm[role=link],.trev-emps span[role=link]{cursor:pointer}
+  .mtr-nm[role=link]:hover,.trev-emps span[role=link]:hover{text-decoration:underline;font-weight:800}
   /* v245: 한 줄 요약 */
   .pfacts{display:flex;flex-wrap:wrap;align-items:center;gap:6px 0;padding:8px 12px}
   .pf{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;white-space:nowrap}
@@ -2092,6 +2103,18 @@ const DB = {
   },
 
   /* --- 관리자 --- */
+  /* v248: 운동처방사 코멘트 저장 — 플랫폼 관리자(운영 총괄·운동처방사 계정)만. 임직원·기업 관리자에게는 내려가지 않음 */
+  async setTrainerNote(id, note){
+    if(!LIVE){
+      const rows = local.all(); const b = rows.find(x => x.id === id); if(!b) throw new Error('예약을 찾지 못했습니다.');
+      const v = String(note||'').trim();
+      b.trainer_note = v || null; b.trainer_note_by = v ? (KSTORE.getItem('demoTrainer') || '운영자') : null; b.trainer_note_at = v ? new Date().toISOString() : null;
+      local.save(rows); return {trainer_note:b.trainer_note, trainer_note_by:b.trainer_note_by, trainer_note_at:b.trainer_note_at};
+    }
+    const {data, error} = await sb.rpc('admin_set_trainer_note', {p_id:id, p_note:note});
+    if(error){ if(/admin_set_trainer_note|PGRST202|42883/.test((error.message||'') + (error.code||''))) throw new Error('서버에 메모 저장 함수가 없습니다. 40번 SQL을 먼저 실행해 주세요.'); throw error; }
+    return data || {};
+  },
   async adminList(){
     if(!LIVE) return local.all().sort((a,b)=> (b.slot_date+b.slot_time).localeCompare(a.slot_date+a.slot_time));
     const {data, error} = await sb.rpc('admin_list');
@@ -6954,6 +6977,60 @@ function intakeFactsLineHTML(list, intake){
   return `<div class="pq wide pfacts">${items.join('<span class="pf-sep"></span>')}</div>`;
 }
 
+/* v248: 운동처방사 코멘트 칸 — 플랫폼 관리자(운영 총괄·운동처방사 계정) 화면에서만 그림 */
+function trainerNoteMeta(r){
+  if(!r || !r.trainer_note) return '';
+  const at = r.trainer_note_at ? new Date(r.trainer_note_at) : null;
+  const when = at && !isNaN(at) ? `${at.getMonth()+1}/${at.getDate()} ${pad(at.getHours())}:${pad(at.getMinutes())}` : '';
+  return [r.trainer_note_by, when].filter(Boolean).join(' · ');
+}
+function trainerNoteCardHTML(r){
+  if(!(S.admin && S.admin.authed && S.admin.role === 'operator')) return '';
+  const meta = trainerNoteMeta(r);
+  return `<div class="pq wide tnote" id="tnote-${esc(r.id)}">
+    <div class="pq-q">${ico('edit_note')}운동처방사 메모
+      <span class="tnote-priv">${ico('lock','')} 플랫폼 관리자·운동처방사만 봅니다 (임직원·기업 관리자에게 보이지 않음)</span></div>
+    <textarea class="tnote-ta" rows="3" placeholder="세션 중 관찰한 점, 주의할 점, 다음 세션 권고 등을 적어 두세요. 저장하면 캘린더에서 이름에 마우스를 올렸을 때 '메모:'로 보입니다.">${esc(r.trainer_note || '')}</textarea>
+    <div class="tnote-foot">
+      <span class="sub">${meta ? `마지막 저장: ${esc(meta)}` : '아직 메모가 없습니다.'}</span>
+      <span style="flex:1"></span>
+      ${r.trainer_note ? `<button type="button" class="mini danger" onclick="saveTrainerNote('${esc(r.id)}', true)">지우기</button>` : ''}
+      <button type="button" class="mini" style="border-color:var(--accent);color:var(--accent-dark);font-weight:600" onclick="saveTrainerNote('${esc(r.id)}')">저장</button>
+    </div>
+  </div>`;
+}
+window.saveTrainerNote = async (id, clear) => {
+  const box = document.getElementById('tnote-' + id); const ta = box && box.querySelector('textarea');
+  const note = clear ? '' : (ta ? ta.value : '');
+  if(clear && !confirm('메모를 지울까요?')) return;
+  try{
+    const res = await DB.setTrainerNote(id, note);
+    const row = (S.admin.rows || []).find(x => x.id === id);
+    if(row){ row.trainer_note = res.trainer_note ?? (note.trim() || null); row.trainer_note_by = res.trainer_note_by ?? null; row.trainer_note_at = res.trainer_note_at ?? null; }
+    toast(clear ? '메모를 지웠습니다.' : '메모를 저장했습니다.');
+    render();
+  }catch(e){ console.error(e); toast(authErrKo(e, '메모를 저장하지 못했습니다.')); }
+};
+/* 캘린더 이름에 붙는 말풍선 — 코멘트가 있을 때만 */
+function noteTitleAttr(row){
+  if(!row || !row.trainer_note) return '';
+  const meta = trainerNoteMeta(row);
+  return ` title="메모: ${esc(row.trainer_note)}&#10;— ${esc(row.name || '')} · 운동처방사 메모${meta ? ` (${esc(meta)})` : ''}&#10;(이름을 누르면 예약 상세로 이동)"`;
+}
+const noteMark = row => (row && row.trainer_note) ? '<i class="nmark" aria-hidden="true">✎</i>' : '';
+/* v249: 캘린더에서 임직원 이름을 누르면 전체 예약 › 그 예약의 상세로 이동 (플랫폼 관리자 화면에서만) */
+const nameClickAttr = row => (row && row.id && S.admin && S.admin.role === 'operator')
+  ? ` onclick="event.stopPropagation();openBookingDetail('${esc(row.id)}')" role="link"` : '';
+window.openBookingDetail = (id) => {
+  const row = (S.admin.rows || []).find(x => x.id === id); if(!row) return;
+  S.nav.pf = 'bookings';
+  AD.filter = 'all'; AD.programFilter = 'all'; AD.trainerFilter = 'all'; AD.dateFilter = ''; AD.sel.clear();
+  AD.bookingQuery = row.code || row.name || '';   // 그 예약만 보이게 코드로 검색
+  S.admin.open = id;
+  render();
+  setTimeout(() => { const el = document.querySelector('.detailrow'); if(el) el.scrollIntoView({behavior:'smooth', block:'start'}); }, 80);
+};
+
 /* ---------- 개인 사전 상담 카드 ---------- */
 function intakePersonCard(r){
   const list  = intakeFor(r.program);
@@ -6978,6 +7055,7 @@ function intakePersonCard(r){
         ${list.filter(q => !['injury','note','consent','pain'].includes(q.id) && !FACT_QIDS.includes(q.id) && !['radio','checkbox','auto'].includes(q.type)).map(q => qCardHTML(q, r.intake && r.intake[q.id], r.intake && r.intake[q.id+'_etc'])).join('')}
         ${injuryViewHTML(r.intake || {})}   <!-- v196: 사전 상담과 같은 해부학 그림 + 부위별 통증 게이지 -->
         ${list.filter(q => q.id === 'note').map(q => qCardHTML(q, r.intake && r.intake[q.id], r.intake && r.intake[q.id+'_etc'])).join('')}
+        ${trainerNoteCardHTML(r)}   <!-- v248: 운동처방사 코멘트 -->
         ${r.memo ? `<div class="pq wide"><div class="pq-q">${ico('sticky_note_2')}신청할 때 남긴 메모</div>
                     <div class="pq-note">${esc(r.memo)}</div></div>` : ''}
       </div>
@@ -8104,9 +8182,9 @@ const NAV = {
   company: [
     { id:'dash',   label:'운영 요약',     icon:'dashboard' },
     { id:'people', label:'참여 현황',     icon:'groups' },
-    { id:'cal',    label:'예약 캘린더',   icon:'calendar_month' },
     { id:'sat',    label:'만족도',       icon:'monitoring' },
     { id:'health', label:'건강 리포트',   icon:'bar_chart' },
+    { id:'cal',    label:'예약 캘린더',   icon:'calendar_month' },   // v247: 맨 아래로
   ],
 
   platform: [
@@ -8770,13 +8848,14 @@ function trTimeGrid(cols, colorOf, minCol, showNowLine, fullDay){
         // 한 시간대에 운동처방사 한 명이 한 건만 맡으므로 이름 두 줄이면 충분합니다.
         const who  = ev.key || '';
         const mates = ev.mates || [ev];
-        const emps = mates.map(m => (m.row && m.row.name) || '').filter(Boolean);
+        const empRows = mates.map(m => m.row || {}).filter(x => x && x.name);   // v248
+        const emps = empRows.map(x => x.name);
         // 이름을 세로로 쌓으면 인원이 많을 때 칸 밖으로 잘립니다.
         // 가로로 이어 붙이고, 넘치면 줄바꿈합니다.
         const inner = `<div class="trev-t">${esc(who)}${
                         emps.length > 1 ? ` <em>${emps.length}명</em>` : ''}</div>`
                     + (emps.length ? `<div class="trev-emps">${
-                        emps.map(e => `<span>${esc(e)}</span>`).join('')}</div>` : '');
+                        empRows.map(x => `<span${noteTitleAttr(x)}${nameClickAttr(x)}>${esc(x.name)}${noteMark(x)}</span>`).join('')}</div>` : '');   // v248/v249
         // left/right 를 함께 지정해 칸 안에서만 그려지도록 고정합니다.
         const l = ev.lane * w, r = 100 - (ev.lane + 1) * w;
         return `<div class="trev ${size==='wide'?'':size}"
@@ -8894,16 +8973,16 @@ function trMonthGrid(evs, colorOf){
         sorted.forEach(e => {
           const t = `${pad(Math.floor(e.s/60))}:${pad(e.s%60)}`;
           if(!byTime.has(t)) byTime.set(t, []);
-          byTime.get(t).push((e.row && e.row.name) || '');
+          byTime.get(t).push(e.row || {});
         });
-        const lineOf = ([t, names]) => `${t} ${names.filter(Boolean).join(', ')}`.trim();
+        const lineOf = ([t, rows]) => `${esc(t)} ${rows.filter(x => x && x.name).map(x => `<span class="mtr-nm"${noteTitleAttr(x)}${nameClickAttr(x)}>${esc(x.name)}${noteMark(x)}</span>`).join(', ')}`.trim();   // v248
         const tip = sorted.map(e =>
           `${pad(Math.floor(e.s/60))}:${pad(e.s%60)} ${(e.row && e.row.name) || ''} · ${e.prog.name}`).join('\n');
         return `<div class="mtr" style="background:${col}18;color:${col}"
           title="${esc(k)}&#10;${esc(tip)}">
           <span class="mtr-n">${esc(k)}</span>
           <span class="mtr-k">${evs.length}건</span>
-          <span class="mtr-c">${[...byTime.entries()].map(x => esc(lineOf(x))).join('<br>')}</span>
+          <span class="mtr-c">${[...byTime.entries()].map(x => lineOf(x)).join('<br>')}</span>
         </div>`;
       }).join('')}
     </div>`);
@@ -14131,7 +14210,7 @@ window.seedDemoKIC = (force) => {
 };
 
 async function boot(){
-  console.info("[refit] booking v246");
+  console.info("[refit] booking v249");
   // 폴드·플립을 펼치거나 접을 때, 회전할 때: 폭이 바뀌면 화면을 다시 그립니다 (절대 좌표로 놓인 말풍선·차트가 어긋나지 않게)
   { let lastW = window.innerWidth, t = null;
     window.addEventListener('resize', () => { if(Math.abs(window.innerWidth - lastW) < 40) return;
